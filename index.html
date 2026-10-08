@@ -1,0 +1,741 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Трекер</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --f-bg: #f2f2f7;
+    --f-card: #ffffff;
+    --f-text: #000000;
+    --f-hint: #8e8e93;
+    --f-accent: #0a84ff;
+    --f-accent-text: #ffffff;
+    --f-danger: #ff3b30;
+    --bg: var(--tg-theme-secondary-bg-color, var(--f-bg));
+    --card: var(--tg-theme-section-bg-color, var(--tg-theme-bg-color, var(--f-card)));
+    --text: var(--tg-theme-text-color, var(--f-text));
+    --hint: var(--tg-theme-hint-color, var(--f-hint));
+    --accent: var(--tg-theme-button-color, var(--f-accent));
+    --accent-text: var(--tg-theme-button-text-color, var(--f-accent-text));
+    --danger: var(--tg-theme-destructive-text-color, var(--f-danger));
+    --sep: rgba(127, 127, 127, 0.18);
+    --stop: #ff3b30;
+    --warn: #ff9f0a;
+    --safe-bottom: max(env(safe-area-inset-bottom), var(--tg-safe-area-inset-bottom, 0px));
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --f-bg: #000000;
+      --f-card: #1c1c1e;
+      --f-text: #ffffff;
+      --f-hint: #8e8e93;
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body {
+    font: 16px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+    overscroll-behavior: none;
+  }
+  input, select, button { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  [hidden] { display: none !important; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  .screen { padding: 16px 16px calc(24px + var(--safe-bottom)); max-width: 560px; margin: 0 auto; }
+  .screen.with-bar { padding-bottom: calc(112px + var(--safe-bottom)); }
+
+  /* Header */
+  .top { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin: 4px 0 18px; }
+  .date { color: var(--hint); font-size: 14px; }
+  .today { font-size: 22px; font-weight: 700; margin-top: 2px; }
+  .pill {
+    border: 0; background: var(--card); padding: 9px 14px; border-radius: 999px;
+    font-size: 15px; font-weight: 600; color: var(--accent);
+  }
+
+  /* Banner */
+  .banner {
+    display: flex; gap: 12px; align-items: center; padding: 14px; margin-bottom: 16px;
+    border-radius: 18px; background: color-mix(in srgb, var(--warn) 14%, transparent);
+  }
+  .banner b { display: block; font-size: 15px; }
+  .banner span { color: var(--hint); font-size: 13px; }
+  .banner button {
+    margin-left: auto; flex: none; border: 0; border-radius: 12px; padding: 8px 12px;
+    background: color-mix(in srgb, var(--warn) 22%, transparent); color: var(--warn); font-weight: 600;
+  }
+
+  /* Project cards */
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .card {
+    position: relative; display: flex; flex-direction: column; align-items: flex-start; text-align: left;
+    min-height: 168px; padding: 16px; border: 0; border-radius: 24px; background: var(--card);
+    transition: transform .18s ease, box-shadow .25s ease, background .25s ease;
+  }
+  .card:active { transform: scale(.96); }
+  .card .icon {
+    width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; font-size: 22px;
+    background: color-mix(in srgb, var(--c) 16%, transparent);
+  }
+  .card .name { margin-top: auto; font-weight: 600; font-size: 16px; max-width: 100%;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card .time { font-size: 24px; font-weight: 700; margin-top: 2px; }
+  .card .status { font-size: 12px; opacity: .65; margin-top: 2px; }
+  .card.running { background: linear-gradient(160deg, var(--c), color-mix(in srgb, var(--c) 70%, #000)); color: #fff;
+    box-shadow: 0 10px 24px color-mix(in srgb, var(--c) 40%, transparent); }
+  .card.running .icon { background: rgba(255, 255, 255, .22); }
+  .card .live {
+    position: absolute; top: 18px; right: 18px; width: 10px; height: 10px; border-radius: 50%; background: #fff;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  .editing .card { outline: 2px dashed color-mix(in srgb, var(--c) 60%, transparent); outline-offset: -2px; }
+  @keyframes pulse { 0%, 100% { opacity: .35; transform: scale(.7); } 50% { opacity: 1; transform: scale(1); } }
+
+  .hint { color: var(--hint); font-size: 13px; margin: 16px 4px 0; }
+  .link { border: 0; background: none; color: var(--accent); padding: 12px 4px; font-size: 15px; }
+
+  /* Running bar */
+  .bar {
+    position: fixed; left: 12px; right: 12px; bottom: calc(10px + var(--safe-bottom));
+    max-width: 536px; margin: 0 auto; display: flex; align-items: center; gap: 12px;
+    padding: 10px 10px 10px 18px; border-radius: 28px;
+    background: color-mix(in srgb, var(--card) 88%, transparent);
+    -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, .16);
+    animation: rise .28s ease;
+  }
+  .bar .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; }
+  .bar .info { min-width: 0; }
+  .bar .pname { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar .ptime { font-size: 20px; font-weight: 700; }
+  .stop {
+    margin-left: auto; flex: none; border: 0; border-radius: 999px; padding: 15px 24px;
+    background: var(--stop); color: #fff; font-weight: 700; font-size: 17px; transition: transform .15s;
+  }
+  .stop:active { transform: scale(.94); }
+  @keyframes rise { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+  /* History */
+  .switcher { display: flex; align-items: center; justify-content: space-between; margin: 0 0 16px; }
+  .switcher button { width: 44px; height: 44px; border: 0; border-radius: 50%; background: var(--card); font-size: 20px; color: var(--accent); }
+  .switcher button:disabled { opacity: .3; }
+  .switcher .title { text-align: center; }
+  .switcher .title b { display: block; font-size: 17px; }
+  .switcher .title span { color: var(--hint); font-size: 13px; }
+  .section-title { color: var(--hint); font-size: 13px; text-transform: uppercase; letter-spacing: .02em; margin: 20px 16px 8px; }
+  .group { background: var(--card); border-radius: 16px; overflow: hidden; }
+  .row {
+    display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 16px; border: 0; background: none;
+    text-align: left; border-top: 1px solid var(--sep);
+  }
+  .group > .row:first-child { border-top: 0; }
+  .row .grow { flex: 1; min-width: 0; }
+  .row .sub { color: var(--hint); font-size: 14px; }
+  .row .val { color: var(--hint); }
+  .row.total { font-weight: 700; }
+  .row.total .val { color: var(--text); }
+  .stripe { width: 4px; height: 34px; border-radius: 2px; flex: none; }
+  .empty { padding: 16px; color: var(--hint); }
+  .primary {
+    display: block; width: 100%; margin-top: 16px; padding: 14px; border: 0; border-radius: 14px;
+    background: var(--accent); color: var(--accent-text); font-weight: 600; font-size: 16px;
+  }
+
+  /* Sheets */
+  .overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, .35); animation: fade .2s ease; z-index: 10; }
+  .sheet {
+    position: fixed; left: 0; right: 0; bottom: 0; max-width: 560px; margin: 0 auto; z-index: 11;
+    max-height: 88vh; overflow-y: auto; padding: 8px 16px calc(20px + var(--safe-bottom));
+    background: var(--bg); border-radius: 22px 22px 0 0; animation: up .25s ease;
+    -webkit-user-select: text; user-select: text;
+  }
+  .sheet .grab { width: 36px; height: 5px; border-radius: 3px; background: var(--sep); margin: 4px auto 10px; }
+  .sheet h2 { font-size: 18px; text-align: center; margin: 0 0 14px; }
+  .field { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--sep); }
+  .group > .field:first-child { border-top: 0; }
+  .field input, .field select {
+    border: 0; background: color-mix(in srgb, var(--hint) 14%, transparent); border-radius: 10px;
+    padding: 8px 10px; min-width: 0; max-width: 62%; text-align: right;
+  }
+  .field input[type=text] { text-align: left; flex: 1; max-width: none; }
+  .note { color: var(--hint); font-size: 13px; margin: 8px 16px 0; }
+  .note.err { color: var(--danger); }
+  .actions { display: flex; gap: 10px; margin-top: 16px; }
+  .actions button { flex: 1; padding: 14px; border: 0; border-radius: 14px; font-weight: 600; }
+  .btn-cancel { background: var(--card); }
+  .btn-save { background: var(--accent); color: var(--accent-text); }
+  .btn-save:disabled { opacity: .4; }
+  .btn-danger { display: block; width: 100%; margin-top: 10px; padding: 14px; border: 0; border-radius: 14px; background: var(--card); color: var(--danger); font-weight: 600; }
+  .swatches { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; padding: 14px 16px; }
+  .swatch { aspect-ratio: 1; border-radius: 50%; border: 3px solid transparent; }
+  .swatch.on { border-color: var(--text); }
+  @keyframes fade { from { opacity: 0; } }
+  @keyframes up { from { transform: translateY(40px); opacity: .4; } }
+</style>
+</head>
+<body>
+
+<main id="main" class="screen">
+  <div class="top">
+    <div>
+      <div class="date" id="today-date"></div>
+      <div class="today">Сегодня: <span class="num" data-live="today-total"></span></div>
+    </div>
+    <button class="pill" id="open-history">История</button>
+  </div>
+  <div id="banner-slot"></div>
+  <div class="grid" id="grid"></div>
+  <p class="hint" id="hint">Нажмите на проект, чтобы начать. Нажатие на другой проект переключит таймер.</p>
+  <button class="link" id="toggle-edit">Изменить проекты</button>
+  <button class="link" id="add-home" hidden>Добавить на экран «Домой»</button>
+</main>
+
+<section id="history" class="screen" hidden></section>
+
+<div class="bar" id="bar" hidden>
+  <span class="dot" id="bar-dot"></span>
+  <div class="info">
+    <div class="pname" id="bar-name"></div>
+    <div class="ptime num" data-live="bar"></div>
+  </div>
+  <button class="stop" id="bar-stop">■ Стоп</button>
+</div>
+
+<div id="sheet-root"></div>
+
+<script>
+'use strict';
+
+// ---------- Telegram ----------
+const W = window.Telegram && window.Telegram.WebApp;
+const inTelegram = !!(W && W.initData);
+const supports = (v) => inTelegram && W.isVersionAtLeast && W.isVersionAtLeast(v);
+
+function haptic(kind) {
+  if (!supports('6.1')) return;
+  if (kind === 'success' || kind === 'warning') W.HapticFeedback.notificationOccurred(kind);
+  else W.HapticFeedback.impactOccurred(kind || 'light');
+}
+
+// ---------- Storage: Telegram CloudStorage + local cache ----------
+const LOCAL_PREFIX = 'tracker:';
+const Store = {
+  cloud: supports('6.9') ? W.CloudStorage : null,
+  localGet(key) { try { return localStorage.getItem(LOCAL_PREFIX + key); } catch (e) { return null; } },
+  localSet(key, value) { try { localStorage.setItem(LOCAL_PREFIX + key, value); } catch (e) {} },
+  getMany(keys) {
+    return new Promise((resolve) => {
+      const local = () => Object.fromEntries(keys.map((k) => [k, Store.localGet(k)]));
+      if (!Store.cloud) return resolve(local());
+      Store.cloud.getItems(keys, (err, values) => {
+        if (err || !values) return resolve(local());
+        const out = {};
+        for (const k of keys) {
+          out[k] = values[k] ? values[k] : Store.localGet(k);
+          if (values[k]) Store.localSet(k, values[k]);
+        }
+        resolve(out);
+      });
+    });
+  },
+  set(key, value) {
+    Store.localSet(key, value);
+    if (Store.cloud) Store.cloud.setItem(key, value, (err) => { if (err) console.warn('CloudStorage', err); });
+  },
+};
+
+// ---------- Data ----------
+const COLORS = ['#0A84FF', '#FF9F0A', '#30D158', '#BF5AF2', '#FF375F', '#40C8E0',
+                '#5E5CE6', '#FF453A', '#E5B800', '#2FB8A8', '#AC8E68', '#64D2FF'];
+const DEFAULT_PROJECTS = [
+  { name: 'Проект 1', emoji: '💼', color: 0 },
+  { name: 'Проект 2', emoji: '📚', color: 1 },
+  { name: 'Проект 3', emoji: '💻', color: 2 },
+  { name: 'Проект 4', emoji: '🏃', color: 3 },
+];
+const FORGOTTEN_AFTER = 8 * 3600 * 1000;
+
+// running: { p: projectIndex, s: startMs } | null
+let state = { projects: DEFAULT_PROJECTS.map((p) => ({ ...p })), running: null };
+// Entries are split per local day: key "dYYYYMMDD" -> [[project, startSec, endSec], ...]
+const days = new Map();
+
+const pad = (n) => String(n).padStart(2, '0');
+const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+const dayKey = (d) => `d${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+const sec = (ms) => Math.round(ms / 1000);
+
+function parseJSON(text, fallback) {
+  try { return text ? JSON.parse(text) : fallback; } catch (e) { return fallback; }
+}
+
+async function loadDays(keys) {
+  const missing = keys.filter((k) => !days.has(k));
+  if (!missing.length) return;
+  const values = await Store.getMany(missing);
+  for (const k of missing) if (!days.has(k)) days.set(k, parseJSON(values[k], []));
+}
+
+function saveDay(key) {
+  const list = days.get(key) || [];
+  list.sort((a, b) => a[1] - b[1]);
+  Store.set(key, JSON.stringify(list));
+}
+
+function saveState() { Store.set('state', JSON.stringify(state)); }
+
+/** Stores [startMs, endMs) for a project, split at local midnights. */
+async function addInterval(p, startMs, endMs) {
+  const pieces = [];
+  let cur = startMs;
+  while (cur < endMs) {
+    const next = addDays(startOfDay(new Date(cur)), 1).getTime();
+    const end = Math.min(endMs, next);
+    if (end - cur >= 1000) pieces.push({ key: dayKey(new Date(cur)), entry: [p, sec(cur), sec(end)] });
+    cur = end;
+  }
+  await loadDays([...new Set(pieces.map((x) => x.key))]);
+  for (const { key, entry } of pieces) days.get(key).push(entry);
+  for (const key of new Set(pieces.map((x) => x.key))) saveDay(key);
+}
+
+/** Seconds spent on a day (optionally for one project), including the running timer. */
+function secondsOn(day, project, now) {
+  const from = startOfDay(day).getTime();
+  const to = addDays(startOfDay(day), 1).getTime();
+  let total = 0;
+  for (const [p, s, e] of days.get(dayKey(day)) || []) {
+    if (project == null || p === project) total += Math.max(0, e - s);
+  }
+  const r = state.running;
+  if (r && (project == null || r.p === project)) {
+    total += Math.max(0, Math.min(now, to) - Math.max(r.s, from)) / 1000;
+  }
+  return total;
+}
+
+// ---------- Actions ----------
+async function toggle(p) {
+  const now = Date.now();
+  const r = state.running;
+  if (r && r.p === p) {
+    await stopAt(now);
+    haptic('medium');
+  } else {
+    if (r) await stopAt(now);
+    state.running = { p, s: now };
+    saveState();
+    haptic('heavy');
+  }
+  render();
+}
+
+async function stopAt(endMs) {
+  const r = state.running;
+  if (!r) return;
+  state.running = null;
+  saveState();
+  await addInterval(r.p, r.s, Math.max(endMs, r.s));
+}
+
+// ---------- Formatting ----------
+function clock(total) {
+  total = Math.max(0, Math.floor(total));
+  const h = Math.floor(total / 3600), m = Math.floor(total % 3600 / 60), s = total % 60;
+  return h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+function short(total) {
+  const minutes = Math.floor(Math.max(0, total) / 60);
+  const h = Math.floor(minutes / 60), m = minutes % 60;
+  if (!h) return `${m} мин`;
+  return m ? `${h} ч ${m} мин` : `${h} ч`;
+}
+const hm = (ms) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const localInput = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${hm(ms)}`; };
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const color = (p) => COLORS[(state.projects[p] || {}).color % COLORS.length] || COLORS[0];
+const weekdayDate = (d) => d.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
+
+// ---------- Main screen ----------
+const $ = (id) => document.getElementById(id);
+let editMode = false;
+let historyDay = null;
+
+function render() {
+  const now = Date.now();
+  const r = state.running;
+  $('today-date').textContent = weekdayDate(new Date(now));
+
+  $('grid').classList.toggle('editing', editMode);
+  $('grid').innerHTML = state.projects.map((p, i) => {
+    const running = r && r.p === i;
+    return `<button class="card${running ? ' running' : ''}" data-p="${i}" style="--c:${color(i)}">
+      <span class="icon">${esc(p.emoji || '•')}</span>
+      ${running ? '<span class="live"></span>' : ''}
+      <span class="name">${esc(p.name)}</span>
+      <span class="time num" data-live="card:${i}"></span>
+      <span class="status">${editMode ? 'Нажмите, чтобы изменить' : running ? 'Идёт' : 'Сегодня'}</span>
+    </button>`;
+  }).join('');
+  $('toggle-edit').textContent = editMode ? 'Готово' : 'Изменить проекты';
+  $('hint').textContent = editMode
+    ? 'Нажмите на проект, чтобы поменять название, значок или цвет.'
+    : 'Нажмите на проект, чтобы начать. Нажатие на другой проект переключит таймер.';
+
+  $('bar').hidden = !r;
+  document.querySelectorAll('.screen').forEach((el) => el.classList.toggle('with-bar', !!r));
+  if (r) {
+    $('bar-dot').style.background = color(r.p);
+    $('bar-name').textContent = state.projects[r.p].name;
+  }
+
+  renderBanner(now);
+  if (historyDay) renderHistory();
+  tick();
+}
+
+function renderBanner(now) {
+  const r = state.running;
+  const show = r && now - r.s > FORGOTTEN_AFTER;
+  const slot = $('banner-slot');
+  if (!show) { slot.innerHTML = ''; return; }
+  slot.innerHTML = `<div class="banner">
+    <div><b>Таймер идёт уже ${short((now - r.s) / 1000)}</b><span>Забыли выключить?</span></div>
+    <button id="fix-running">Исправить</button></div>`;
+  $('fix-running').onclick = openRunningEditor;
+}
+
+function tick() {
+  const now = Date.now();
+  const today = new Date(now);
+  if (!days.has(dayKey(today))) loadDays([dayKey(today)]).then(render);
+  for (const el of document.querySelectorAll('[data-live]')) {
+    const [kind, arg] = el.dataset.live.split(':');
+    let text = '';
+    if (kind === 'today-total') text = short(secondsOn(today, null, now));
+    else if (kind === 'card') text = clock(secondsOn(today, +arg, now));
+    else if (kind === 'bar' && state.running) text = clock((now - state.running.s) / 1000);
+    else if (kind === 'hist-p' && historyDay) text = short(secondsOn(historyDay, +arg, now));
+    else if (kind === 'hist-total' && historyDay) text = short(secondsOn(historyDay, null, now));
+    else if (kind === 'run-dur' && state.running) text = short((now - state.running.s) / 1000);
+    if (el.textContent !== text) el.textContent = text;
+  }
+  const r = state.running;
+  const bannerShown = !!$('banner-slot').firstChild;
+  if (!!(r && now - r.s > FORGOTTEN_AFTER) !== bannerShown) renderBanner(now);
+}
+
+$('grid').addEventListener('click', (e) => {
+  const card = e.target.closest('.card');
+  if (!card) return;
+  const p = +card.dataset.p;
+  if (editMode) openProjectEditor(p); else toggle(p);
+});
+$('bar-stop').onclick = async () => { await stopAt(Date.now()); haptic('medium'); render(); };
+$('toggle-edit').onclick = () => { editMode = !editMode; haptic('light'); render(); };
+$('open-history').onclick = () => openHistory(new Date());
+
+// ---------- History ----------
+async function openHistory(day) {
+  historyDay = startOfDay(day);
+  await loadDays([dayKey(historyDay)]);
+  $('main').hidden = true;
+  $('history').hidden = false;
+  if (supports('6.1')) W.BackButton.show();
+  renderHistory();
+  tick();
+  window.scrollTo(0, 0);
+}
+
+function closeHistory() {
+  historyDay = null;
+  $('history').hidden = true;
+  $('main').hidden = false;
+  if (supports('6.1')) W.BackButton.hide();
+  render();
+}
+
+function historyRows(day, now) {
+  const from = startOfDay(day).getTime();
+  const to = addDays(startOfDay(day), 1).getTime();
+  const rows = (days.get(dayKey(day)) || []).map((e, index) => ({ p: e[0], s: e[1] * 1000, e: e[2] * 1000, index }));
+  const r = state.running;
+  if (r && r.s < to && now >= from) rows.push({ p: r.p, s: Math.max(r.s, from), e: null, running: true });
+  return rows.sort((a, b) => a.s - b.s);
+}
+
+function renderHistory() {
+  const day = historyDay;
+  const now = Date.now();
+  const isToday = dayKey(day) === dayKey(new Date(now));
+  const yesterday = dayKey(day) === dayKey(addDays(new Date(now), -1));
+  const title = isToday ? 'Сегодня' : yesterday ? 'Вчера' : day.toLocaleDateString('ru-RU', { weekday: 'long' });
+  const rows = historyRows(day, now);
+
+  $('history').innerHTML = `
+    <div class="switcher">
+      <button id="prev-day" aria-label="Предыдущий день">‹</button>
+      <div class="title"><b>${esc(title)}</b><span>${esc(day.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }))}</span></div>
+      <button id="next-day" aria-label="Следующий день" ${isToday ? 'disabled' : ''}>›</button>
+    </div>
+    <div class="section-title">Итого за день</div>
+    <div class="group">
+      ${state.projects.map((p, i) => `
+        <div class="row"><span>${esc(p.emoji || '•')}</span><span class="grow">${esc(p.name)}</span>
+        <span class="val num" data-live="hist-p:${i}"></span></div>`).join('')}
+      <div class="row total"><span class="grow">Всего</span><span class="val num" data-live="hist-total"></span></div>
+    </div>
+    <div class="section-title">Записи</div>
+    <div class="group">
+      ${rows.length ? rows.map((x) => `
+        <button class="row" data-index="${x.running ? 'running' : x.index}">
+          <span class="stripe" style="background:${color(x.p)}"></span>
+          <span class="grow"><div>${esc((state.projects[x.p] || {}).name || 'Проект')}</div>
+          <div class="sub">${hm(x.s)} – ${x.running ? 'сейчас' : hm(x.e)}</div></span>
+          <span class="val num" ${x.running ? 'data-live="run-dur"' : ''}>${x.running ? '' : short((x.e - x.s) / 1000)}</span>
+        </button>`).join('') : '<div class="empty">В этот день таймер не запускался.</div>'}
+    </div>
+    <p class="hint">Нажмите на запись, чтобы поправить время или удалить её.</p>
+    <button class="primary" id="add-entry">+ Добавить запись</button>
+    ${inTelegram ? '' : '<button class="link" id="back-main">← Назад</button>'}`;
+
+  $('prev-day').onclick = () => openHistory(addDays(day, -1));
+  $('next-day').onclick = () => openHistory(addDays(day, 1));
+  $('add-entry').onclick = () => openEntryEditor(day, null);
+  if ($('back-main')) $('back-main').onclick = closeHistory;
+  $('history').querySelectorAll('.row[data-index]').forEach((el) => {
+    el.onclick = () => el.dataset.index === 'running' ? openRunningEditor() : openEntryEditor(day, +el.dataset.index);
+  });
+}
+
+// ---------- Sheets ----------
+let closeSheet = null;
+
+function openSheet(title, html, onMount) {
+  const root = $('sheet-root');
+  root.innerHTML = `<div class="overlay"></div><div class="sheet" role="dialog" aria-label="${esc(title)}">
+    <div class="grab"></div><h2>${esc(title)}</h2>${html}</div>`;
+  closeSheet = () => {
+    root.innerHTML = '';
+    closeSheet = null;
+    if (supports('6.1') && !historyDay) W.BackButton.hide();
+  };
+  root.querySelector('.overlay').onclick = closeSheet;
+  if (supports('6.1')) W.BackButton.show();
+  onMount(root.querySelector('.sheet'));
+}
+
+function projectOptions(selected) {
+  return state.projects.map((p, i) => `<option value="${i}" ${i === selected ? 'selected' : ''}>${esc(p.emoji || '')} ${esc(p.name)}</option>`).join('');
+}
+
+function minutesOf(value) {
+  const [h, m] = value.split(':').map(Number);
+  return h * 60 + m;
+}
+
+/** Edit (index != null) or add an entry on a given day. */
+function openEntryEditor(day, index) {
+  const dayStart = startOfDay(day).getTime();
+  const list = days.get(dayKey(day)) || [];
+  const existing = index != null ? list[index] : null;
+  const now = Date.now();
+  let s, e;
+  if (existing) { s = existing[1] * 1000; e = existing[2] * 1000; }
+  else if (dayKey(day) === dayKey(new Date(now))) { e = now; s = Math.max(dayStart, now - 3600 * 1000); }
+  else { s = dayStart + 12 * 3600 * 1000; e = s + 3600 * 1000; }
+  const endValue = e >= dayStart + 86400 * 1000 - 500 ? '00:00' : hm(e);
+
+  openSheet(existing ? 'Запись' : 'Новая запись', `
+    <div class="group">
+      <label class="field"><span>Проект</span><select id="f-project">${projectOptions(existing ? existing[0] : 0)}</select></label>
+      <label class="field"><span>Начало</span><input type="time" id="f-start" value="${hm(s)}"></label>
+      <label class="field"><span>Конец</span><input type="time" id="f-end" value="${endValue}"></label>
+    </div>
+    <p class="note" id="f-note"></p>
+    <div class="actions"><button class="btn-cancel" id="f-cancel">Отмена</button><button class="btn-save" id="f-save">Сохранить</button></div>
+    ${existing ? '<button class="btn-danger" id="f-delete">Удалить запись</button>' : ''}`,
+  (sheet) => {
+    const read = () => {
+      const st = $('f-start').value, en = $('f-end').value;
+      if (!st || !en) return null;
+      const start = dayStart + minutesOf(st) * 60000;
+      const end = en === '00:00' && st !== '00:00' ? dayStart + 86400 * 1000 : dayStart + minutesOf(en) * 60000;
+      return { start, end };
+    };
+    const validate = () => {
+      const v = read();
+      const note = $('f-note');
+      let error = '';
+      if (!v) error = 'Укажите начало и конец.';
+      else if (v.end <= v.start) error = 'Конец должен быть позже начала.';
+      else if (v.end > Date.now() + 60000) error = 'Конец не может быть в будущем.';
+      note.classList.toggle('err', !!error);
+      note.textContent = error || `Длительность: ${short((v.end - v.start) / 1000)}. «00:00» в конце — до полуночи.`;
+      $('f-save').disabled = !!error;
+      return error ? null : v;
+    };
+    sheet.querySelectorAll('input').forEach((el) => el.addEventListener('input', validate));
+    validate();
+    $('f-cancel').onclick = closeSheet;
+    $('f-save').onclick = () => {
+      const v = validate();
+      if (!v) return;
+      const entry = [+$('f-project').value, sec(v.start), sec(v.end)];
+      if (!days.has(dayKey(day))) days.set(dayKey(day), []);
+      const target = days.get(dayKey(day));
+      if (existing) target[index] = entry; else target.push(entry);
+      saveDay(dayKey(day));
+      haptic('success');
+      closeSheet();
+      render();
+    };
+    if (existing) $('f-delete').onclick = () => confirmThen('Удалить запись?', () => {
+      days.get(dayKey(day)).splice(index, 1);
+      saveDay(dayKey(day));
+      haptic('warning');
+      closeSheet();
+      render();
+    });
+  });
+}
+
+/** Running timer: change project/start, or stop it at an earlier time ("forgot to turn off"). */
+function openRunningEditor() {
+  const r = state.running;
+  if (!r) return;
+  const now = Date.now();
+  const suggestedEnd = Math.min(now, r.s + 3600 * 1000);
+
+  openSheet('Идущий таймер', `
+    <div class="group">
+      <label class="field"><span>Проект</span><select id="r-project">${projectOptions(r.p)}</select></label>
+      <label class="field"><span>Начало</span><input type="datetime-local" id="r-start" value="${localInput(r.s)}" max="${localInput(now)}"></label>
+    </div>
+    <div class="actions"><button class="btn-cancel" id="r-cancel">Отмена</button><button class="btn-save" id="r-save">Сохранить</button></div>
+    <div class="section-title">Забыли выключить?</div>
+    <div class="group">
+      <label class="field"><span>Закончили в</span><input type="datetime-local" id="r-end" value="${localInput(suggestedEnd)}" min="${localInput(r.s)}" max="${localInput(now)}"></label>
+    </div>
+    <p class="note" id="r-note">Таймер остановится, и в истории будет указанное время.</p>
+    <button class="primary" id="r-stop">Остановить в это время</button>
+    <button class="btn-danger" id="r-discard">Не учитывать этот таймер</button>`,
+  () => {
+    $('r-cancel').onclick = closeSheet;
+    $('r-save').onclick = () => {
+      const start = new Date($('r-start').value).getTime();
+      if (!isFinite(start) || start > Date.now()) return showNote('Начало не может быть в будущем.');
+      state.running = { p: +$('r-project').value, s: start };
+      saveState();
+      haptic('success');
+      closeSheet();
+      render();
+    };
+    $('r-stop').onclick = async () => {
+      const end = new Date($('r-end').value).getTime();
+      const current = state.running;
+      if (!current) return closeSheet();
+      if (!isFinite(end) || end <= current.s) return showNote('Время окончания должно быть позже начала.');
+      await stopAt(Math.min(end, Date.now()));
+      haptic('success');
+      closeSheet();
+      render();
+    };
+    $('r-discard').onclick = () => confirmThen('Удалить идущий таймер без записи?', () => {
+      state.running = null;
+      saveState();
+      closeSheet();
+      render();
+    });
+  });
+
+  function showNote(text) {
+    const note = $('r-note');
+    note.textContent = text;
+    note.classList.add('err');
+    haptic('warning');
+  }
+}
+
+function openProjectEditor(p) {
+  const project = state.projects[p];
+  let selectedColor = project.color;
+  openSheet('Проект', `
+    <div class="group">
+      <label class="field"><span>Название</span><input type="text" id="p-name" maxlength="24" value="${esc(project.name)}"></label>
+      <label class="field"><span>Значок</span><input type="text" id="p-emoji" maxlength="4" value="${esc(project.emoji || '')}" style="max-width:72px;text-align:center"></label>
+    </div>
+    <div class="section-title">Цвет</div>
+    <div class="group"><div class="swatches" id="p-colors">
+      ${COLORS.map((c, i) => `<button class="swatch${i === selectedColor ? ' on' : ''}" data-c="${i}" style="background:${c}" aria-label="Цвет ${i + 1}"></button>`).join('')}
+    </div></div>
+    <div class="actions"><button class="btn-cancel" id="p-cancel">Отмена</button><button class="btn-save" id="p-save">Сохранить</button></div>`,
+  () => {
+    $('p-colors').onclick = (e) => {
+      const sw = e.target.closest('.swatch');
+      if (!sw) return;
+      selectedColor = +sw.dataset.c;
+      $('p-colors').querySelectorAll('.swatch').forEach((el) => el.classList.toggle('on', +el.dataset.c === selectedColor));
+      haptic('light');
+    };
+    $('p-cancel').onclick = closeSheet;
+    $('p-save').onclick = () => {
+      const name = $('p-name').value.trim();
+      if (!name) return;
+      state.projects[p] = { name, emoji: $('p-emoji').value.trim(), color: selectedColor };
+      saveState();
+      haptic('success');
+      closeSheet();
+      render();
+    };
+  });
+}
+
+function confirmThen(message, action) {
+  if (supports('6.2')) W.showConfirm(message, (ok) => { if (ok) action(); });
+  else if (window.confirm(message)) action();
+}
+
+// ---------- Start ----------
+async function init() {
+  if (inTelegram) {
+    W.ready();
+    W.expand();
+    if (supports('7.7')) W.disableVerticalSwipes();
+    if (supports('6.1')) {
+      W.setHeaderColor('secondary_bg_color');
+      W.setBackgroundColor('secondary_bg_color');
+      W.BackButton.onClick(() => { if (closeSheet) closeSheet(); else if (historyDay) closeHistory(); });
+    }
+    if (supports('8.0')) {
+      W.checkHomeScreenStatus((status) => { $('add-home').hidden = status === 'added' || status === 'unsupported'; });
+      $('add-home').onclick = () => W.addToHomeScreen();
+    }
+  }
+
+  // Instant render from local cache, then refresh from Telegram cloud.
+  const cachedState = parseJSON(Store.localGet('state'), null);
+  if (cachedState && Array.isArray(cachedState.projects)) state = cachedState;
+  render();
+
+  const todayKey = dayKey(new Date());
+  const values = await Store.getMany(['state', todayKey]);
+  const loaded = parseJSON(values.state, null);
+  if (loaded && Array.isArray(loaded.projects)) state = loaded;
+  days.set(todayKey, parseJSON(values[todayKey], []));
+  render();
+
+  setInterval(tick, 1000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
+}
+
+init();
+</script>
+</body>
+</html>
