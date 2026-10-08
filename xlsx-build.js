@@ -1,6 +1,7 @@
 /* Builds the monthly "resource tracker" workbook.
  *
- * data = { pn, from, to, name, role, nw, wr, p: [ { n: "Project", t: [ { n: "Task", w: [min x nw], e: [min x nw] } ] } ] }
+ * data = { pn, from, to, name, role, nw, wr, p: [ { n: "Project", r: "Role", t: [ { n: "Task", w: [min x nw], e: [min x nw] } ] } ] }
+ *   p[].r    - role in that project (falls back to data.role)
  *   pn       - number of the 4-week period (period 1 = the first 4 weeks of tracking)
  *   from, to - first and last day of the period, "YYYY-MM-DD"
  *   nw       - number of week columns (4)
@@ -78,6 +79,7 @@
       ? 'період ' + data.pn + ' (' + isoToText(data.from) + ' – ' + isoToText(data.to) + ')'
       : MONTHS[data.m - 1] + ' ' + data.y;
     var ranges = data.wr || [];
+    var role = project.r != null ? project.r : (data.role || '');   // each project can have its own role
 
     // Title + hint
     ws.mergeCells(r0, 1, r0, K.last);
@@ -141,7 +143,7 @@
       for (var k = 0; k < nW; k++) { colW[k] += t.w[k] || 0; colE[k] += t.e[k] || 0; }
 
       put(ws, 'A' + r, idx === 0 ? data.name : '', { fill: band, bold: true, color: C.navy, align: 'left' });
-      put(ws, 'B' + r, idx === 0 ? data.role : '', { fill: band });
+      put(ws, 'B' + r, idx === 0 ? role : '', { fill: band });
       put(ws, 'C' + r, t.n, { fill: band, align: 'left' });
 
       var termsW = [], termsE = [];
@@ -160,7 +162,7 @@
     var T = totalRow;
     var dark = { fill: C.navy, color: C.white, bold: true };
     put(ws, 'A' + T, data.name, Object.assign({ align: 'left' }, dark));
-    put(ws, 'B' + T, data.role === 'Лід' ? 'Менеджер' : data.role, dark);
+    put(ws, 'B' + T, role, dark);
     put(ws, 'C' + T, 'РАЗОМ', dark);
 
     for (var w = 0; w < nW; w++) {

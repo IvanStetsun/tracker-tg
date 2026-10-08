@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="ru">
+<html lang="uk">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Excel-таблица</title>
+<title>Excel-таблиця</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 <style>
   :root { --bg: #f2f2f7; --card: #fff; --text: #000; --hint: #8e8e93; --accent: #0a84ff; --sep: rgba(127,127,127,.2); }
@@ -31,19 +31,19 @@
 </head>
 <body>
 <main>
-  <h1>Excel-таблица</h1>
+  <h1>Excel-таблиця</h1>
   <p class="sub" id="sub"></p>
   <div class="group" id="summary"></div>
-  <button id="download" disabled>Скачать .xlsx</button>
-  <button id="share" class="alt" hidden>Поделиться файлом</button>
+  <button id="download" disabled>Завантажити .xlsx</button>
+  <button id="share" class="alt" hidden>Поділитися файлом</button>
   <p class="note" id="note"></p>
 </main>
 <script>
 'use strict';
 const $ = (id) => document.getElementById(id);
-const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+const MONTHS = ['січень', 'лютий', 'березень', 'квітень', 'травень', 'червень', 'липень', 'серпень', 'вересень', 'жовтень', 'листопад', 'грудень'];
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const short = (min) => { const h = Math.floor(min / 60), m = min % 60; return h ? (m ? `${h} ч ${m} мин` : `${h} ч`) : `${m} мин`; };
+const short = (min) => { const h = Math.floor(min / 60), m = min % 60; return h ? (m ? `${h} год ${m} хв` : `${h} год`) : `${m} хв`; };
 const sum = (a) => a.reduce((x, y) => x + y, 0);
 
 function decode(hash) {
@@ -76,14 +76,17 @@ function loadScript(src) {
     data = decode(location.hash.slice(1));
     if (!data || !Array.isArray(data.p)) throw new Error('bad data');
   } catch (e) {
-    return fail('Нет данных для таблицы. Откройте эту страницу кнопкой «Excel» в приложении.');
+    return fail('Немає даних для таблиці. Відкрийте цю сторінку кнопкою «Excel» у застосунку.');
   }
 
   const isoToText = (s) => s.split('-').reverse().join('.');
   const periodName = data.pn
-    ? `Период ${data.pn}: ${isoToText(data.from)} – ${isoToText(data.to)}`
+    ? `Період ${data.pn}: ${isoToText(data.from)} – ${isoToText(data.to)}`
     : `${MONTHS[data.m - 1]} ${data.y}`;
-  $('sub').textContent = periodName;
+  const taken = data.at
+    ? new Date(data.at).toLocaleString('uk-UA', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })
+    : '';
+  $('sub').textContent = periodName + (taken ? ` · дані на ${taken}` : '');
   document.title = `Трекер · ${periodName}`;
 
   let all = 0;
@@ -91,14 +94,14 @@ function loadScript(src) {
     const t = sum(p.t.map((x) => sum(x.w) + sum(x.e)));
     all += t;
     return `<div class="row"><span class="n">${esc(p.n)}</span><span class="v">${short(t)}</span></div>`;
-  }).join('') + `<div class="row total"><span class="n">${data.pn ? 'Всего за 4 недели' : 'Всего за месяц'}</span><span class="v">${short(all)}</span></div>`;
+  }).join('') + `<div class="row total"><span class="n">${data.pn ? 'Всього за 4 тижні' : 'Всього за місяць'}</span><span class="v">${short(all)}</span></div>`;
 
   if (typeof ExcelJS === 'undefined' || !window.TrackerXlsx) {
-    return fail('Не удалось загрузить библиотеку Excel. Проверьте интернет и обновите страницу.');
+    return fail('Не вдалося завантажити бібліотеку Excel. Перевірте інтернет і оновіть сторінку.');
   }
 
   const fileName = data.pn
-    ? `Трекер_период-${data.pn}_${data.from}.xlsx`
+    ? `Трекер_період-${data.pn}_${data.from}.xlsx`
     : `Трекер_${data.y}-${String(data.m).padStart(2, '0')}.xlsx`;
   let file;
   try {
@@ -106,7 +109,7 @@ function loadScript(src) {
     file = new File([buffer], fileName, { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   } catch (e) {
     console.error(e);
-    return fail('Не получилось собрать таблицу: ' + e.message);
+    return fail('Не вдалося зібрати таблицю: ' + e.message);
   }
 
   $('download').disabled = false;
@@ -125,7 +128,8 @@ function loadScript(src) {
     $('share').hidden = false;
     $('share').onclick = () => navigator.share({ files: [file], title: fileName }).catch(() => {});
   }
-  $('note').textContent = 'Таблица готова. Нажмите «Скачать», затем откройте файл в Excel, Numbers или Google Таблицах. «Поделиться» отправит файл, например, в Telegram.';
+  $('note').textContent = 'Таблиця готова. Натисніть «Завантажити», потім відкрийте файл в Excel, Numbers або Google Таблицях. «Поділитися» надішле файл, наприклад, у Telegram. ' +
+    'Ця сторінка — знімок даних на вказаний час: якщо щось змінили в застосунку (назви, записи), натисніть там «Excel» → «Відкрити таблицю» ще раз.';
   window.__ready = { fileName, size: file.size };
 })();
 </script>

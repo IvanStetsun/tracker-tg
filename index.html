@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru">
+<html lang="uk">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
@@ -166,7 +166,7 @@
 'use strict';
 
 // Must match version.txt. A mismatch means this page came from a stale cache, so it reloads itself.
-const APP_VERSION = '2026-10-08.6';
+const APP_VERSION = '2026-10-08.8';
 
 function checkForUpdate() {
   fetch('version.txt?t=' + Date.now(), { cache: 'no-store' })
@@ -221,7 +221,7 @@ const Store = {
   },
   set(key, value) {
     Store.localSet(key, value);
-    if (Store.cloud) Store.cloud.setItem(key, value, (err) => { if (err) { console.warn('CloudStorage', err); toast('Не удалось сохранить в облако Telegram'); } });
+    if (Store.cloud) Store.cloud.setItem(key, value, (err) => { if (err) { console.warn('CloudStorage', err); toast('Не вдалося зберегти в хмару Telegram'); } });
   },
   remove(key) {
     Store.localRemove(key);
@@ -230,13 +230,15 @@ const Store = {
 };
 
 // ---------- Data model ----------
-// meta:     { order:[projectId], next:int, run:{t,k,s}|null, name, role }
-// project:  key "p<id>" -> { n:name, c:colorIndex, t:[[taskId, name], ...] }
+// meta:     { order:[projectId], next:int, run:{t,k,s}|null, name, role (default role), w0, mig }
+// project:  key "p<id>" -> { n:name, c:colorIndex, r:role ('' = use meta.role), t:[[taskId, name], ...] }
 // day:      key "eYYYYMMDD" -> [[taskId, kind(0 work / 1 edits), offsetSec, durationSec], ...] (offset from local midnight)
 const COLORS = ['#0A84FF', '#FF9F0A', '#30D158', '#BF5AF2', '#FF375F', '#40C8E0',
                 '#5E5CE6', '#FF453A', '#E5B800', '#2FB8A8', '#AC8E68', '#64D2FF'];
-const KIND = ['Работа', 'Правки'];
+const KIND = ['Робота', 'Правки'];
 const DEFAULT_TASKS = ['Бриф / постановка задачі', 'Контент-план', 'Клієнтська комунікація', 'Звіт', 'Стратегія', 'Координація команди', 'Інше'];
+const DEFAULT_PROJECTS = ['Клуб Сиру', 'Канів', "Lel'", 'Ambassador', 'Чорна Карта', 'Аквамарин', 'Філадельфія'];
+const TEXTS_TASK = 'Написання текстів';   // the only task of the 7th project
 const FORGOTTEN_AFTER = 8 * 3600 * 1000;
 
 let meta = { order: [], next: 1, run: null, name: '', role: 'Лід' };
@@ -291,21 +293,39 @@ function rebuildIndex() {
 }
 
 function saveMeta() { Store.set('meta', JSON.stringify(meta)); }
-function saveProject(p) { Store.set('p' + p.id, JSON.stringify({ n: p.n, c: p.c, t: p.t })); rebuildIndex(); }
+function saveProject(p) { Store.set('p' + p.id, JSON.stringify({ n: p.n, c: p.c, t: p.t, r: p.r || '' })); rebuildIndex(); }
 const newId = () => meta.next++;
 
 function seedDefaults() {
-  meta = { order: [], next: 1, run: null, name: tgName(), role: 'Лід' };
+  meta = { order: [], next: 1, run: null, name: tgName(), role: 'Лід', mig: 1 };
   projects.clear();
-  for (let i = 0; i < 7; i++) {
+  DEFAULT_PROJECTS.forEach((name, i) => {
     const id = newId();
-    const count = i === 6 ? 3 : 7;
-    projects.set(id, { id, n: `Проект ${i + 1}`, c: i, t: DEFAULT_TASKS.slice(0, count).map((name) => [newId(), name]) });
+    const tasks = i === 6 ? [TEXTS_TASK] : DEFAULT_TASKS;
+    projects.set(id, { id, n: name, c: i, r: '', t: tasks.map((t) => [newId(), t]) });
     meta.order.push(id);
-  }
+  });
   rebuildIndex();
   saveMeta();
   for (const p of projects.values()) saveProject(p);
+}
+
+/**
+ * One-time update for people who opened the app before the real project names existed:
+ * untouched "Проект N" names get the real names, and an untouched 7th project keeps only "Написання текстів".
+ */
+function migrateDefaults() {
+  if (meta.mig >= 1) return;
+  meta.order.forEach((pid, i) => {
+    const p = projects.get(pid);
+    if (!p || i >= DEFAULT_PROJECTS.length) return;
+    if (/^Проект \d+$/.test(p.n)) p.n = DEFAULT_PROJECTS[i];
+    const untouched7th = i === 6 && p.t.length === 3 && p.t.every(([, n], k) => n === DEFAULT_TASKS[k]);
+    if (untouched7th) p.t = [[newId(), TEXTS_TASK]];
+    saveProject(p);
+  });
+  meta.mig = 1;
+  saveMeta();
 }
 
 async function loadAll() {
@@ -317,7 +337,7 @@ async function loadAll() {
   meta.order = meta.order.filter((id) => {
     const p = parseJSON(values['p' + id], null);
     if (!p || !Array.isArray(p.t)) return false;
-    projects.set(id, { id, n: p.n, c: p.c || 0, t: p.t });
+    projects.set(id, { id, n: p.n, c: p.c || 0, t: p.t, r: p.r || '' });
     return true;
   });
   rebuildIndex();
@@ -341,7 +361,7 @@ function saveDay(key) {
   list.sort((a, b) => a.s - b.s);
   const base = dayFromKey(key).getTime();
   const json = JSON.stringify(list.map((e) => [e.t, e.k, Math.round((e.s - base) / 1000), Math.round((e.e - e.s) / 1000)]));
-  if (json.length > 4000) toast('За этот день слишком много записей — часть может не сохраниться в облаке');
+  if (json.length > 4000) toast('За цей день забагато записів — частина може не зберегтися в хмарі');
   Store.set(key, json);
 }
 
@@ -410,15 +430,15 @@ function clock(total) {
 function short(total) {
   const minutes = Math.floor(Math.max(0, total) / 60);
   const h = Math.floor(minutes / 60), m = minutes % 60;
-  if (!h) return `${m} мин`;
-  return m ? `${h} ч ${m} мин` : `${h} ч`;
+  if (!h) return `${m} хв`;
+  return m ? `${h} год ${m} хв` : `${h} год`;
 }
 const hm = (ms) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const localInput = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${hm(ms)}`; };
-const weekdayDate = (d) => d.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
+const weekdayDate = (d) => d.toLocaleDateString('uk-UA', { weekday: 'long', day: 'numeric', month: 'long' });
 const colorOf = (pid) => COLORS[((projects.get(pid) || {}).c || 0) % COLORS.length];
-const taskName = (tid) => (taskIndex.get(tid) || {}).name || 'Задача';
-const projectName = (pid) => (projects.get(pid) || {}).n || 'Проект';
+const taskName = (tid) => (taskIndex.get(tid) || {}).name || 'Завдання';
+const projectName = (pid) => (projects.get(pid) || {}).n || 'Проєкт';
 
 let toastTimer = null;
 function toast(text) {
@@ -482,16 +502,16 @@ function homeHtml(r) {
   const runPid = r ? taskIndex.get(r.t).pid : null;
   return `
     <div class="top"><div>
-      <div class="date">${esc(weekdayDate(new Date()))}${meta.w0 && weekNo(new Date()) >= 1 ? ` · период ${periodOf(new Date())}, неделя ${(weekNo(new Date()) - 1) % PERIOD_WEEKS + 1} из ${PERIOD_WEEKS}` : ''}</div>
-      <div class="today">Сегодня: <span class="num" data-live="today-total"></span></div>
+      <div class="date">${esc(weekdayDate(new Date()))}${meta.w0 && weekNo(new Date()) >= 1 ? ` · період ${periodOf(new Date())}, тиждень ${(weekNo(new Date()) - 1) % PERIOD_WEEKS + 1} з ${PERIOD_WEEKS}` : ''}</div>
+      <div class="today">Сьогодні: <span class="num" data-live="today-total"></span></div>
     </div></div>
     <div class="chips">
-      <button class="pill" data-act="history">История</button>
+      <button class="pill" data-act="history">Історія</button>
       <button class="pill" data-act="excel">Excel</button>
-      <button class="pill" data-act="settings">Настройки</button>
+      <button class="pill" data-act="settings">Налаштування</button>
     </div>
     <div id="banner-slot"></div>
-    <div class="section-title">Проекты</div>
+    <div class="section-title">Проєкти</div>
     ${meta.order.map((pid) => {
       const p = projects.get(pid);
       return `<button class="prow${runPid === pid ? ' running' : ''}" data-act="open-project" data-pid="${pid}" style="--c:${colorOf(pid)}">
@@ -501,15 +521,15 @@ function homeHtml(r) {
         <span class="val num" data-live="proj:${pid}"></span><span class="chev">›</span>
       </button>`;
     }).join('')}
-    <button class="link" data-act="add-project">+ Добавить проект</button>
-    <button class="link" data-act="add-home" ${canAddHome ? '' : 'hidden'}>Добавить на экран «Домой»</button>`;
+    <button class="link" data-act="add-project">+ Додати проєкт</button>
+    <button class="link" data-act="add-home" ${canAddHome ? '' : 'hidden'}>Додати на екран «Додому»</button>`;
 }
 
 function plural(n) {
   const a = n % 10, b = n % 100;
-  if (a === 1 && b !== 11) return 'задача';
-  if (a >= 2 && a <= 4 && (b < 10 || b >= 20)) return 'задачи';
-  return 'задач';
+  if (a === 1 && b !== 11) return 'завдання';
+  if (a >= 2 && a <= 4 && (b < 10 || b >= 20)) return 'завдання';
+  return 'завдань';
 }
 
 function projectHtml(r) {
@@ -526,37 +546,37 @@ function projectHtml(r) {
   }).join('');
 
   return `
-    <button class="back" data-act="back">‹ Проекты</button>
+    <button class="back" data-act="back">‹ Проєкти</button>
     <div class="top"><div>
       <div class="today" style="color:${colorOf(p.id)}">${esc(p.n)}</div>
-      <div class="date">Сегодня: <span class="num" data-live="proj:${p.id}"></span></div>
-    </div><button class="pill${editMode ? ' on' : ''}" data-act="toggle-edit">${editMode ? 'Готово' : 'Изменить'}</button></div>
+      <div class="date">Сьогодні: <span class="num" data-live="proj:${p.id}"></span></div>
+    </div><button class="pill${editMode ? ' on' : ''}" data-act="toggle-edit">${editMode ? 'Готово' : 'Змінити'}</button></div>
     <div id="banner-slot"></div>
-    ${tasks || '<p class="hint">В проекте пока нет задач. Нажмите «Изменить» и добавьте.</p>'}
+    ${tasks || '<p class="hint">У проєкті поки немає завдань. Натисніть «Змінити» і додайте.</p>'}
     ${editMode ? `
-      <button class="link" data-act="add-task">+ Добавить задачу</button>
-      <button class="link" data-act="edit-project">Название и цвет проекта</button>`
-      : '<p class="hint">У каждой задачи два таймера: «Работа» и «Правки». Нажатие на другой таймер переключает счёт.</p>'}`;
+      <button class="link" data-act="add-task">+ Додати завдання</button>
+      <button class="link" data-act="edit-project">Назва, роль і колір проєкту</button>`
+      : '<p class="hint">У кожного завдання два таймери: «Робота» і «Правки». Натискання на інший таймер перемикає відлік.</p>'}`;
 }
 
 function historyHtml(now) {
   const day = historyDay;
   const isToday = dayKey(day) === dayKey(new Date(now));
   const yesterday = dayKey(day) === dayKey(addDays(new Date(now), -1));
-  const title = isToday ? 'Сегодня' : yesterday ? 'Вчера' : day.toLocaleDateString('ru-RU', { weekday: 'long' });
+  const title = isToday ? 'Сьогодні' : yesterday ? 'Вчора' : day.toLocaleDateString('uk-UA', { weekday: 'long' });
   const rows = entriesOf(day, now);
   return `
     <button class="back" data-act="back">‹ Назад</button>
     <div class="switcher">
-      <button data-act="prev-day" aria-label="Предыдущий день">‹</button>
-      <div class="title"><b>${esc(title)}</b><span>${esc(day.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }))}</span></div>
-      <button data-act="next-day" aria-label="Следующий день" ${isToday ? 'disabled' : ''}>›</button>
+      <button data-act="prev-day" aria-label="Попередній день">‹</button>
+      <div class="title"><b>${esc(title)}</b><span>${esc(day.toLocaleDateString('uk-UA', { day: 'numeric', month: 'long', year: 'numeric' }))}</span></div>
+      <button data-act="next-day" aria-label="Наступний день" ${isToday ? 'disabled' : ''}>›</button>
     </div>
-    <div class="section-title">Итого за день</div>
+    <div class="section-title">Разом за день</div>
     <div class="group">
       ${meta.order.map((pid) => `<div class="row"><span class="estripe" style="background:${colorOf(pid)};height:22px"></span>
         <span class="grow"><div>${esc(projectName(pid))}</div></span><span class="val num" data-live="h-p:${pid}"></span></div>`).join('')}
-      <div class="row total"><span class="grow">Всего</span><span class="val num" data-live="h-total"></span></div>
+      <div class="row total"><span class="grow">Всього</span><span class="val num" data-live="h-total"></span></div>
     </div>
     <div class="section-title">Записи</div>
     <div class="group">
@@ -565,13 +585,13 @@ function historyHtml(now) {
         return `<button class="row" data-act="entry" data-i="${x.run ? 'run' : x.idx}">
           <span class="estripe" style="background:${x.k ? 'var(--ke)' : 'var(--kw)'}"></span>
           <span class="grow"><div>${esc(info.name)}</div>
-          <div class="sub">${esc(projectName(info.pid))} · ${KIND[x.k]} · ${hm(x.s)}–${x.run ? 'сейчас' : hm(x.e)}</div></span>
+          <div class="sub">${esc(projectName(info.pid))} · ${KIND[x.k]} · ${hm(x.s)}–${x.run ? 'зараз' : hm(x.e)}</div></span>
           <span class="val num"${x.run ? ' data-live="run-dur"' : ''}>${x.run ? '' : short((x.e - x.s) / 1000)}</span>
         </button>`;
-      }).join('') : '<div class="empty">В этот день таймер не запускался.</div>'}
+      }).join('') : '<div class="empty">Цього дня таймер не запускався.</div>'}
     </div>
-    <p class="hint">Нажмите на запись, чтобы поправить время или удалить её.</p>
-    <button class="primary" data-act="add-entry">+ Добавить запись</button>`;
+    <p class="hint">Натисніть на запис, щоб виправити час або видалити його.</p>
+    <button class="primary" data-act="add-entry">+ Додати запис</button>`;
 }
 
 function renderBanner(now) {
@@ -579,8 +599,8 @@ function renderBanner(now) {
   if (!slot) return;
   const r = meta.run;
   if (!r || !taskIndex.has(r.t) || now - r.s <= FORGOTTEN_AFTER) { slot.innerHTML = ''; return; }
-  slot.innerHTML = `<div class="banner"><div><b>Таймер идёт уже ${short((now - r.s) / 1000)}</b>
-    <span>Забыли выключить? ${esc(taskName(r.t))}</span></div><button data-act="fix-run">Исправить</button></div>`;
+  slot.innerHTML = `<div class="banner"><div><b>Таймер іде вже ${short((now - r.s) / 1000)}</b>
+    <span>Забули вимкнути? ${esc(taskName(r.t))}</span></div><button data-act="fix-run">Виправити</button></div>`;
 }
 
 function tick() {
@@ -668,14 +688,14 @@ function confirmThen(message, action) {
 }
 
 function swatchesHtml(selected) {
-  return COLORS.map((c, i) => `<button class="swatch${i === selected ? ' on' : ''}" data-c="${i}" style="background:${c}" aria-label="Цвет ${i + 1}"></button>`).join('');
+  return COLORS.map((c, i) => `<button class="swatch${i === selected ? ' on' : ''}" data-c="${i}" style="background:${c}" aria-label="Колір ${i + 1}"></button>`).join('');
 }
 
 // Project / task pickers shared by the entry and running-timer editors
 function pickerHtml() {
   return `<div class="group">
-    <label class="field"><span>Проект</span><select id="f-project">${meta.order.map((id) => `<option value="${id}">${esc(projectName(id))}</option>`).join('')}</select></label>
-    <label class="field"><span>Задача</span><select id="f-task"></select></label>
+    <label class="field"><span>Проєкт</span><select id="f-project">${meta.order.map((id) => `<option value="${id}">${esc(projectName(id))}</option>`).join('')}</select></label>
+    <label class="field"><span>Завдання</span><select id="f-task"></select></label>
     <label class="field"><span>Тип</span><select id="f-kind">${KIND.map((n, i) => `<option value="${i}">${n}</option>`).join('')}</select></label>
   </div>`;
 }
@@ -705,15 +725,15 @@ function openEntryEditor(day, index) {
   else { s = dayStart + 12 * 3600 * 1000; e = s + 3600 * 1000; }
   const endValue = e >= dayStart + 86400 * 1000 - 500 ? '00:00' : hm(e);
 
-  openSheet(existing ? 'Запись' : 'Новая запись', `
+  openSheet(existing ? 'Запис' : 'Новий запис', `
     ${pickerHtml()}
     <div class="group" style="margin-top:12px">
-      <label class="field"><span>Начало</span><input type="time" id="f-start" value="${hm(s)}"></label>
-      <label class="field"><span>Конец</span><input type="time" id="f-end" value="${endValue}"></label>
+      <label class="field"><span>Початок</span><input type="time" id="f-start" value="${hm(s)}"></label>
+      <label class="field"><span>Кінець</span><input type="time" id="f-end" value="${endValue}"></label>
     </div>
     <p class="note" id="f-note"></p>
-    <div class="actions"><button class="btn-cancel" id="f-cancel">Отмена</button><button class="btn-save" id="f-save">Сохранить</button></div>
-    ${existing ? '<button class="btn-danger" id="f-delete">Удалить запись</button>' : ''}`,
+    <div class="actions"><button class="btn-cancel" id="f-cancel">Скасувати</button><button class="btn-save" id="f-save">Зберегти</button></div>
+    ${existing ? '<button class="btn-danger" id="f-delete">Видалити запис</button>' : ''}`,
   (sheet) => {
     wirePicker(existing ? existing.t : null, existing ? existing.k : 0, curPid);
     const read = () => {
@@ -727,12 +747,12 @@ function openEntryEditor(day, index) {
     const validate = () => {
       const v = read();
       let error = '';
-      if (!$('f-task').value) error = 'В этом проекте нет задач.';
-      else if (!v) error = 'Укажите начало и конец.';
-      else if (v.end <= v.start) error = 'Конец должен быть позже начала.';
-      else if (v.end > Date.now() + 60000) error = 'Конец не может быть в будущем.';
+      if (!$('f-task').value) error = 'У цьому проєкті немає завдань.';
+      else if (!v) error = 'Вкажіть початок і кінець.';
+      else if (v.end <= v.start) error = 'Кінець має бути пізніше за початок.';
+      else if (v.end > Date.now() + 60000) error = 'Кінець не може бути в майбутньому.';
       $('f-note').classList.toggle('err', !!error);
-      $('f-note').textContent = error || `Длительность: ${short((v.end - v.start) / 1000)}. «00:00» в конце — до полуночи.`;
+      $('f-note').textContent = error || `Тривалість: ${short((v.end - v.start) / 1000)}. «00:00» у кінці — до півночі.`;
       $('f-save').disabled = !!error;
       return error ? null : v;
     };
@@ -751,7 +771,7 @@ function openEntryEditor(day, index) {
       closeSheet();
       render();
     };
-    if (existing) $('f-delete').onclick = () => confirmThen('Удалить запись?', () => {
+    if (existing) $('f-delete').onclick = () => confirmThen('Видалити запис?', () => {
       days.get(dayKey(day)).splice(index, 1);
       saveDay(dayKey(day));
       haptic('warning');
@@ -768,27 +788,27 @@ function openRunningEditor() {
   const now = Date.now();
   const suggestedEnd = Math.min(now, r.s + 3600 * 1000);
 
-  openSheet('Идущий таймер', `
+  openSheet('Активний таймер', `
     ${pickerHtml()}
     <div class="group" style="margin-top:12px">
-      <label class="field"><span>Начало</span><input type="datetime-local" id="r-start" value="${localInput(r.s)}" max="${localInput(now)}"></label>
+      <label class="field"><span>Початок</span><input type="datetime-local" id="r-start" value="${localInput(r.s)}" max="${localInput(now)}"></label>
     </div>
-    <div class="actions"><button class="btn-cancel" id="r-cancel">Отмена</button><button class="btn-save" id="r-save">Сохранить</button></div>
-    <div class="section-title">Забыли выключить?</div>
+    <div class="actions"><button class="btn-cancel" id="r-cancel">Скасувати</button><button class="btn-save" id="r-save">Зберегти</button></div>
+    <div class="section-title">Забули вимкнути?</div>
     <div class="group">
-      <label class="field"><span>Закончили в</span><input type="datetime-local" id="r-end" value="${localInput(suggestedEnd)}" min="${localInput(r.s)}" max="${localInput(now)}"></label>
+      <label class="field"><span>Закінчили о</span><input type="datetime-local" id="r-end" value="${localInput(suggestedEnd)}" min="${localInput(r.s)}" max="${localInput(now)}"></label>
     </div>
-    <p class="note" id="r-note">Таймер остановится, и в истории будет указанное время.</p>
-    <button class="primary" id="r-stop">Остановить в это время</button>
-    <button class="btn-danger" id="r-discard">Не учитывать этот таймер</button>`,
+    <p class="note" id="r-note">Таймер зупиниться, а в історії буде вказаний час.</p>
+    <button class="primary" id="r-stop">Зупинити в цей час</button>
+    <button class="btn-danger" id="r-discard">Не враховувати цей таймер</button>`,
   () => {
     wirePicker(r.t, r.k, null);
     const showNote = (text) => { $('r-note').textContent = text; $('r-note').classList.add('err'); haptic('warning'); };
     $('r-cancel').onclick = closeSheet;
     $('r-save').onclick = () => {
       const start = new Date($('r-start').value).getTime();
-      if (!isFinite(start) || start > Date.now()) return showNote('Начало не может быть в будущем.');
-      if (!$('f-task').value) return showNote('Выберите задачу.');
+      if (!isFinite(start) || start > Date.now()) return showNote('Початок не може бути в майбутньому.');
+      if (!$('f-task').value) return showNote('Виберіть завдання.');
       meta.run = { t: +$('f-task').value, k: +$('f-kind').value, s: start };
       saveMeta();
       haptic('success');
@@ -799,14 +819,14 @@ function openRunningEditor() {
       const end = new Date($('r-end').value).getTime();
       const current = meta.run;
       if (!current) return closeSheet();
-      if (!isFinite(end) || end <= current.s) return showNote('Время окончания должно быть позже начала.');
+      if (!isFinite(end) || end <= current.s) return showNote('Час закінчення має бути пізніше за початок.');
       if ($('f-task').value) { current.t = +$('f-task').value; current.k = +$('f-kind').value; }
       await stopAt(Math.min(end, Date.now()));
       haptic('success');
       closeSheet();
       render();
     };
-    $('r-discard').onclick = () => confirmThen('Удалить идущий таймер без записи?', () => {
+    $('r-discard').onclick = () => confirmThen('Видалити активний таймер без запису?', () => {
       meta.run = null;
       saveMeta();
       closeSheet();
@@ -820,7 +840,7 @@ function addProject() {
   const used = new Set([...projects.values()].map((p) => p.c));
   let c = 0;
   while (used.has(c) && c < COLORS.length) c++;
-  const p = { id, n: `Проект ${meta.order.length + 1}`, c: c % COLORS.length, t: [] };
+  const p = { id, n: `Проєкт ${meta.order.length + 1}`, c: c % COLORS.length, r: '', t: [] };
   projects.set(id, p);
   meta.order.push(id);
   saveProject(p);
@@ -832,12 +852,16 @@ function addProject() {
 function openProjectSheet(pid) {
   const p = projects.get(pid);
   let color = p.c;
-  openSheet('Проект', `
-    <div class="group"><label class="field"><span>Название</span><input type="text" id="p-name" maxlength="40" value="${esc(p.n)}"></label></div>
-    <div class="section-title">Цвет</div>
+  openSheet('Проєкт', `
+    <div class="group">
+      <label class="field"><span>Назва</span><input type="text" id="p-name" maxlength="40" value="${esc(p.n)}"></label>
+      <label class="field"><span>Роль у проєкті</span><input type="text" id="p-role" maxlength="30" value="${esc(p.r || '')}" placeholder="${esc(meta.role || 'Наприклад, Лід')}"></label>
+    </div>
+    <p class="note">Роль потрапить у колонку «Роль» Excel-таблиці для цього проєкту. Якщо поле порожнє — береться роль із налаштувань.</p>
+    <div class="section-title">Колір</div>
     <div class="group"><div class="swatches" id="p-colors">${swatchesHtml(color)}</div></div>
-    <div class="actions"><button class="btn-cancel" id="p-cancel">Отмена</button><button class="btn-save" id="p-save">Сохранить</button></div>
-    <button class="btn-danger" id="p-delete">Удалить проект</button>`,
+    <div class="actions"><button class="btn-cancel" id="p-cancel">Скасувати</button><button class="btn-save" id="p-save">Зберегти</button></div>
+    <button class="btn-danger" id="p-delete">Видалити проєкт</button>`,
   () => {
     $('p-colors').onclick = (e) => {
       const sw = e.target.closest('.swatch');
@@ -850,13 +874,13 @@ function openProjectSheet(pid) {
     $('p-save').onclick = () => {
       const name = $('p-name').value.trim();
       if (!name) return;
-      p.n = name; p.c = color;
+      p.n = name; p.c = color; p.r = $('p-role').value.trim();
       saveProject(p);
       haptic('success');
       closeSheet();
       render();
     };
-    $('p-delete').onclick = () => confirmThen(`Удалить проект «${p.n}» со всеми задачами? Записанное время пропадёт из Excel.`, async () => {
+    $('p-delete').onclick = () => confirmThen(`Видалити проєкт «${p.n}» з усіма завданнями? Записаний час зникне з Excel.`, async () => {
       if (meta.run && taskIndex.has(meta.run.t) && taskIndex.get(meta.run.t).pid === pid) { meta.run = null; }
       projects.delete(pid);
       meta.order = meta.order.filter((id) => id !== pid);
@@ -873,11 +897,11 @@ function openProjectSheet(pid) {
 function openTaskSheet(tid) {
   const p = projects.get(curPid);
   const existing = tid != null ? p.t.find((x) => x[0] === tid) : null;
-  openSheet(existing ? 'Задача' : 'Новая задача', `
-    <div class="group"><label class="field"><span>Название</span><input type="text" id="t-name" maxlength="60" value="${esc(existing ? existing[1] : '')}" placeholder="Например, Контент-план"></label></div>
-    <p class="note">У каждой задачи будет два таймера: «Работа» и «Правки».</p>
-    <div class="actions"><button class="btn-cancel" id="t-cancel">Отмена</button><button class="btn-save" id="t-save">Сохранить</button></div>
-    ${existing ? '<button class="btn-danger" id="t-delete">Удалить задачу</button>' : ''}`,
+  openSheet(existing ? 'Завдання' : 'Нове завдання', `
+    <div class="group"><label class="field"><span>Назва</span><input type="text" id="t-name" maxlength="60" value="${esc(existing ? existing[1] : '')}" placeholder="Наприклад, Контент-план"></label></div>
+    <p class="note">У кожного завдання буде два таймери: «Робота» і «Правки».</p>
+    <div class="actions"><button class="btn-cancel" id="t-cancel">Скасувати</button><button class="btn-save" id="t-save">Зберегти</button></div>
+    ${existing ? '<button class="btn-danger" id="t-delete">Видалити завдання</button>' : ''}`,
   () => {
     $('t-cancel').onclick = closeSheet;
     $('t-save').onclick = () => {
@@ -890,7 +914,7 @@ function openTaskSheet(tid) {
       closeSheet();
       render();
     };
-    if (existing) $('t-delete').onclick = () => confirmThen(`Удалить задачу «${existing[1]}»? Записанное по ней время пропадёт из Excel.`, async () => {
+    if (existing) $('t-delete').onclick = () => confirmThen(`Видалити завдання «${existing[1]}»? Записаний по ньому час зникне з Excel.`, async () => {
       if (meta.run && meta.run.t === tid) meta.run = null;
       p.t = p.t.filter((x) => x[0] !== tid);
       saveProject(p);
@@ -903,17 +927,17 @@ function openTaskSheet(tid) {
 }
 
 function openSettings() {
-  openSheet('Настройки', `
+  openSheet('Налаштування', `
     <div class="group">
-      <label class="field"><span>Имя</span><input type="text" id="s-name" maxlength="30" value="${esc(meta.name)}" placeholder="Для Excel"></label>
-      <label class="field"><span>Роль</span><input type="text" id="s-role" maxlength="30" value="${esc(meta.role)}"></label>
+      <label class="field"><span>Ім'я</span><input type="text" id="s-name" maxlength="30" value="${esc(meta.name)}" placeholder="Для Excel"></label>
+      <label class="field"><span>Роль за замовчуванням</span><input type="text" id="s-role" maxlength="30" value="${esc(meta.role)}"></label>
     </div>
-    <p class="note">Имя и роль попадут в первые колонки Excel-таблицы.</p>
+    <p class="note">Ім'я потрапить у першу колонку Excel-таблиці. Роль можна задати окремо для кожного проєкту (Змінити → Назва, роль і колір); ця використовується, якщо в проєкті роль не вказана.</p>
     <div class="group" style="margin-top:12px">
-      <label class="field"><span>Неделя 1 начинается</span><input type="date" id="s-w0" value="${esc(meta.w0 || '')}"></label>
+      <label class="field"><span>Тиждень 1 починається</span><input type="date" id="s-w0" value="${esc(meta.w0 || '')}"></label>
     </div>
-    <p class="note">С этой недели начинается период 1. Периоды идут подряд по 4 недели (пн–вс), без привязки к месяцам. Выбранная дата округляется до понедельника своей недели.</p>
-    <div class="actions"><button class="btn-cancel" id="s-cancel">Отмена</button><button class="btn-save" id="s-save">Сохранить</button></div>`,
+    <p class="note">З цього тижня починається період 1. Періоди йдуть поспіль по 4 тижні (пн–нд), без прив'язки до місяців. Вибрана дата округлюється до понеділка свого тижня.</p>
+    <div class="actions"><button class="btn-cancel" id="s-cancel">Скасувати</button><button class="btn-save" id="s-save">Зберегти</button></div>`,
   () => {
     $('s-cancel').onclick = closeSheet;
     $('s-save').onclick = () => {
@@ -938,7 +962,7 @@ let expToken = 0;
 const periodOf = (date) => Math.max(1, Math.floor((weekNo(date) - 1) / PERIOD_WEEKS) + 1);
 const periodStart = (n) => addDays(parseIso(meta.w0 || isoDate(mondayOf(new Date()))), (n - 1) * PERIOD_WEEKS * 7);
 const dm = (d) => `${d.getDate()}.${pad(d.getMonth() + 1)}`;
-const dmRu = (d) => d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+const dmRu = (d) => d.toLocaleDateString('uk-UA', { day: 'numeric', month: 'short' });
 
 function toB64Url(obj) {
   const bytes = new TextEncoder().encode(JSON.stringify(obj));
@@ -967,18 +991,18 @@ async function buildPayload(n) {
   });
   const toMin = (a) => a.map((s) => Math.round(s / 60));
   return {
-    pn: n, from: isoDate(start), to: isoDate(dayList[dayList.length - 1]),
+    pn: n, from: isoDate(start), to: isoDate(dayList[dayList.length - 1]), at: now,
     name: meta.name || tgName(), role: meta.role || '', nw, wr,
     p: meta.order.map((pid) => {
       const p = projects.get(pid);
-      return { n: p.n, t: p.t.map(([tid, name]) => { const a = acc.get(tid) || { w: zeros(), e: zeros() }; return { n: name, w: toMin(a.w), e: toMin(a.e) }; }) };
+      return { n: p.n, r: p.r || meta.role || '', t: p.t.map(([tid, name]) => { const a = acc.get(tid) || { w: zeros(), e: zeros() }; return { n: name, w: toMin(a.w), e: toMin(a.e) }; }) };
     }),
   };
 }
 
 function openExport() {
   expPeriod = periodOf(new Date());
-  openSheet('Excel-таблица', '<div id="exp-body"></div>', renderExport);
+  openSheet('Excel-таблиця', '<div id="exp-body"></div>', renderExport);
 }
 
 async function renderExport() {
@@ -989,10 +1013,10 @@ async function renderExport() {
   const start = periodStart(expPeriod);
   const end = addDays(start, PERIOD_WEEKS * 7 - 1);
   const switcher = `<div class="switcher">
-    <button id="x-prev" aria-label="Предыдущий период" ${expPeriod <= 1 ? 'disabled' : ''}>‹</button>
-    <div class="title"><b>Период ${expPeriod}</b><span>${esc(dmRu(start))} – ${esc(dmRu(end))}${expPeriod === current ? ' · сейчас' : ''}</span></div>
-    <button id="x-next" aria-label="Следующий период" ${expPeriod >= current ? 'disabled' : ''}>›</button></div>`;
-  body.innerHTML = `${switcher}<p class="note">Считаю…</p>`;
+    <button id="x-prev" aria-label="Попередній період" ${expPeriod <= 1 ? 'disabled' : ''}>‹</button>
+    <div class="title"><b>Період ${expPeriod}</b><span>${esc(dmRu(start))} – ${esc(dmRu(end))}${expPeriod === current ? ' · зараз' : ''}</span></div>
+    <button id="x-next" aria-label="Наступний період" ${expPeriod >= current ? 'disabled' : ''}>›</button></div>`;
+  body.innerHTML = `${switcher}<p class="note">Рахую…</p>`;
   const wire = () => {
     $('x-prev').onclick = () => { expPeriod = Math.max(1, expPeriod - 1); renderExport(); };
     $('x-next').onclick = () => { expPeriod = Math.min(current, expPeriod + 1); renderExport(); };
@@ -1006,10 +1030,10 @@ async function renderExport() {
   body.innerHTML = `${switcher}
     <div class="group">
       ${payload.p.map((p) => `<div class="row"><span class="grow"><div>${esc(p.n)}</div></span><span class="val num">${short(total(p) * 60)}</span></div>`).join('')}
-      <div class="row total"><span class="grow">Всего за 4 недели</span><span class="val num">${short(all * 60)}</span></div>
+      <div class="row total"><span class="grow">Всього за 4 тижні</span><span class="val num">${short(all * 60)}</span></div>
     </div>
-    <p class="note">Таблица откроется в браузере телефона — там нажмите «Скачать». В ней 4 колонки «Тиж. 1–4» — недели этого периода (пн–вс), отдельно «Работа» и «Правки». Время в формате ГОД.ХВ, как в вашем образце.</p>
-    <button class="primary" id="x-open">Открыть таблицу</button>`;
+    <p class="note">Таблиця відкриється в браузері телефона — там натисніть «Завантажити». У ній 4 колонки «Тиж. 1–4» — тижні цього періоду (пн–нд), окремо «Робота» і «Правки». Час у форматі ГОД.ХВ, як у вашому зразку.</p>
+    <button class="primary" id="x-open">Відкрити таблицю</button>`;
   wire();
   $('x-open').onclick = () => {
     const url = new URL('export.html?v=' + APP_VERSION, location.href).href + '#' + toB64Url(payload);
@@ -1038,7 +1062,7 @@ async function init() {
     meta = Object.assign(meta, cachedMeta);
     for (const id of meta.order) {
       const p = parseJSON(Store.localGet('p' + id), null);
-      if (p) projects.set(id, { id, n: p.n, c: p.c || 0, t: p.t });
+      if (p) projects.set(id, { id, n: p.n, c: p.c || 0, t: p.t, r: p.r || '' });
     }
     meta.order = meta.order.filter((id) => projects.has(id));
     rebuildIndex();
@@ -1051,6 +1075,7 @@ async function init() {
     else { saveMeta(); }
   }
   if (!meta.name) { meta.name = tgName(); }
+  migrateDefaults();
   await ensureWeekStart();
   await loadDays([dayKey(new Date())]);
   render();
