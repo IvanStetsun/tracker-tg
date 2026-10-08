@@ -882,27 +882,40 @@ function toB64Url(obj) {
   return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-/** Minutes per task / kind / week for one month. Weeks: days 1-7, 8-14, 15-21, 22-end. */
+/**
+ * Minutes per task / kind / week for one month. Weeks are calendar weeks (Mon-Sun):
+ * week 1 runs from the 1st to the first Sunday, the next week starts on the following Monday.
+ */
 async function buildPayload(first) {
   const y = first.getFullYear(), m = first.getMonth();
   const count = new Date(y, m + 1, 0).getDate();
   const dayList = Array.from({ length: count }, (_, i) => new Date(y, m, i + 1));
   await loadDays(dayList.map(dayKey));
+
+  const offset = (first.getDay() + 6) % 7;                 // 0 = the 1st is a Monday
+  const weekOf = (dayOfMonth) => Math.floor((dayOfMonth - 1 + offset) / 7);
+  const nw = weekOf(count) + 1;
+  const wr = Array.from({ length: nw }, (_, w) => {
+    const inWeek = dayList.map((_, i) => i + 1).filter((d) => weekOf(d) === w);
+    return inWeek[0] === inWeek[inWeek.length - 1] ? `${inWeek[0]}` : `${inWeek[0]}–${inWeek[inWeek.length - 1]}`;
+  });
+  const zeros = () => Array(nw).fill(0);
+
   const now = Date.now();
   const acc = new Map();
   dayList.forEach((day, i) => {
-    const week = Math.min(3, Math.floor(i / 7));
+    const week = weekOf(i + 1);
     for (const x of entriesOf(day, now)) {
-      if (!acc.has(x.t)) acc.set(x.t, { w: [0, 0, 0, 0], e: [0, 0, 0, 0] });
+      if (!acc.has(x.t)) acc.set(x.t, { w: zeros(), e: zeros() });
       acc.get(x.t)[x.k ? 'e' : 'w'][week] += (x.e - x.s) / 1000;
     }
   });
   const toMin = (a) => a.map((s) => Math.round(s / 60));
   return {
-    y, m: m + 1, name: meta.name || tgName(), role: meta.role || '',
+    y, m: m + 1, name: meta.name || tgName(), role: meta.role || '', nw, wr,
     p: meta.order.map((pid) => {
       const p = projects.get(pid);
-      return { n: p.n, t: p.t.map(([tid, name]) => { const a = acc.get(tid) || { w: [0, 0, 0, 0], e: [0, 0, 0, 0] }; return { n: name, w: toMin(a.w), e: toMin(a.e) }; }) };
+      return { n: p.n, t: p.t.map(([tid, name]) => { const a = acc.get(tid) || { w: zeros(), e: zeros() }; return { n: name, w: toMin(a.w), e: toMin(a.e) }; }) };
     }),
   };
 }
@@ -939,7 +952,7 @@ async function renderExport() {
       ${payload.p.map((p) => `<div class="row"><span class="grow"><div>${esc(p.n)}</div></span><span class="val num">${short(total(p) * 60)}</span></div>`).join('')}
       <div class="row total"><span class="grow">Всего за месяц</span><span class="val num">${short(all * 60)}</span></div>
     </div>
-    <p class="note">Таблица откроется в браузере телефона — там нажмите «Скачать». Время считается в формате ГОД.ХВ, как в вашем образце: по неделям, отдельно «Работа» и «Правки».</p>
+    <p class="note">Таблица откроется в браузере телефона — там нажмите «Скачать». Время считается в формате ГОД.ХВ, как в вашем образце: по неделям (пн–вс), отдельно «Работа» и «Правки». Неделя 1 — с 1-го числа до первого воскресенья.</p>
     <button class="primary" id="x-open">Открыть таблицу</button>`;
   wire();
   $('x-open').onclick = () => {
