@@ -166,7 +166,7 @@
 'use strict';
 
 // Must match version.txt. A mismatch means this page came from a stale cache, so it reloads itself.
-const APP_VERSION = '2026-10-08.3';
+const APP_VERSION = '2026-10-08.4';
 
 function checkForUpdate() {
   fetch('version.txt?t=' + Date.now(), { cache: 'no-store' })
@@ -903,28 +903,32 @@ function toB64Url(obj) {
 }
 
 /**
- * Minutes per task / kind / week for one month. Weeks are calendar weeks (Mon-Sun):
- * week 1 runs from the 1st to the first Sunday, the next week starts on the following Monday.
+ * Minutes per task / kind / week for one month. Weeks end on Sunday and start on Monday.
+ * Week 1 is the week of the first recorded day of the month (it runs from that day to the
+ * first Sunday); the next week starts on the following Monday.
  */
 async function buildPayload(first) {
   const y = first.getFullYear(), m = first.getMonth();
   const count = new Date(y, m + 1, 0).getDate();
   const dayList = Array.from({ length: count }, (_, i) => new Date(y, m, i + 1));
   await loadDays(dayList.map(dayKey));
+  const now = Date.now();
 
-  const offset = (first.getDay() + 6) % 7;                 // 0 = the 1st is a Monday
-  const weekOf = (dayOfMonth) => Math.floor((dayOfMonth - 1 + offset) / 7);
-  const nw = weekOf(count) + 1;
+  let firstIdx = dayList.findIndex((day) => entriesOf(day, now).length > 0);
+  if (firstIdx < 0) firstIdx = 0;                                       // nothing recorded yet
+  const offset = (dayList[firstIdx].getDay() + 6) % 7;                  // 0 = first day is a Monday
+  const weekOf = (i) => Math.floor((i - firstIdx + offset) / 7);        // i = zero-based day index
+  const nw = weekOf(count - 1) + 1;
   const wr = Array.from({ length: nw }, (_, w) => {
-    const inWeek = dayList.map((_, i) => i + 1).filter((d) => weekOf(d) === w);
+    const inWeek = dayList.map((_, i) => i).filter((i) => i >= firstIdx && weekOf(i) === w).map((i) => i + 1);
     return inWeek[0] === inWeek[inWeek.length - 1] ? `${inWeek[0]}` : `${inWeek[0]}–${inWeek[inWeek.length - 1]}`;
   });
   const zeros = () => Array(nw).fill(0);
 
-  const now = Date.now();
   const acc = new Map();
   dayList.forEach((day, i) => {
-    const week = weekOf(i + 1);
+    if (i < firstIdx) return;
+    const week = weekOf(i);
     for (const x of entriesOf(day, now)) {
       if (!acc.has(x.t)) acc.set(x.t, { w: zeros(), e: zeros() });
       acc.get(x.t)[x.k ? 'e' : 'w'][week] += (x.e - x.s) / 1000;
@@ -972,7 +976,7 @@ async function renderExport() {
       ${payload.p.map((p) => `<div class="row"><span class="grow"><div>${esc(p.n)}</div></span><span class="val num">${short(total(p) * 60)}</span></div>`).join('')}
       <div class="row total"><span class="grow">Всего за месяц</span><span class="val num">${short(all * 60)}</span></div>
     </div>
-    <p class="note">Таблица откроется в браузере телефона — там нажмите «Скачать». Время считается в формате ГОД.ХВ, как в вашем образце: по неделям (пн–вс), отдельно «Работа» и «Правки». Неделя 1 — с 1-го числа до первого воскресенья.</p>
+    <p class="note">Таблица откроется в браузере телефона — там нажмите «Скачать». Время считается в формате ГОД.ХВ, как в вашем образце: по неделям (пн–вс), отдельно «Работа» и «Правки». Неделя 1 — та, в которой в этом месяце появилась первая запись; следующая начинается с понедельника.</p>
     <button class="primary" id="x-open">Открыть таблицу</button>`;
   wire();
   $('x-open').onclick = () => {

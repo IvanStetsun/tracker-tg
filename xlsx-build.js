@@ -1,7 +1,7 @@
 /* Builds the monthly "resource tracker" workbook.
  *
  * data = { y, m, name, role, nw, wr, p: [ { n: "Project", t: [ { n: "Task", w: [min x nw], e: [min x nw] } ] } ] }
- *   nw - number of calendar weeks (Mon-Sun) the month touches, 4..6; week 1 runs from the 1st to the first Sunday
+ *   nw - number of weeks (Mon-Sun) from the first recorded day of the month to its end; week 1 is the week of that first day
  *   wr - date range label of every week, e.g. ["1-4", "5-11", ...]
  *
  * Week cells hold time as ГОД.ХВ (1.20 = 1 h 20 min), like the original template; every total is a
@@ -83,7 +83,7 @@
     put(ws, 'A' + (r0 + 1),
       'Дані за ' + monthText + ' заповнені автоматично з трекера. Місячні підсумки рахуються автоматично. ' +
       '⏱ Час у форматі ГОД.ХВ: 0.40 = 40 хв, 1.20 = 1 год 20 хв (хвилини 00–59). ' +
-      'Тижні календарні (пн–нд): Тиж. 1 — від 1-го числа до першої неділі, далі з понеділка.',
+      'Тижні календарні (пн–нд): Тиж. 1 — тиждень першого запису в місяці, наступний починається з понеділка.',
       { italic: true, color: C.grayText, align: 'left', wrap: true, size: 10 });
     ws.getRow(r0 + 1).height = 30;
 
