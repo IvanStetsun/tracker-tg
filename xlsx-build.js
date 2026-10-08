@@ -1,8 +1,10 @@
 /* Builds the monthly "resource tracker" workbook.
  *
- * data = { y, m, name, role, nw, wr, p: [ { n: "Project", t: [ { n: "Task", w: [min x nw], e: [min x nw] } ] } ] }
- *   nw - number of weeks (Mon-Sun) from the first recorded day of the month to its end; week 1 is the week of that first day
- *   wr - date range label of every week, e.g. ["1-4", "5-11", ...]
+ * data = { pn, from, to, name, role, nw, wr, p: [ { n: "Project", t: [ { n: "Task", w: [min x nw], e: [min x nw] } ] } ] }
+ *   pn       - number of the 4-week period (period 1 = the first 4 weeks of tracking)
+ *   from, to - first and last day of the period, "YYYY-MM-DD"
+ *   nw       - number of week columns (4)
+ *   wr       - date range of every week, e.g. ["5.10–11.10", "12.10–18.10", ...]
  *
  * Week cells hold time as ГОД.ХВ (1.20 = 1 h 20 min), like the original template; every total is a
  * formula that converts to minutes and back, so editing a cell by hand keeps the sums correct.
@@ -18,6 +20,8 @@
   var NUM = '0.00';
 
   function hm(min) { return Math.floor(min / 60) + (min % 60) / 100; }
+  /** "2026-10-05" -> "05.10.2026" */
+  function isoToText(s) { var p = String(s).split('-'); return p[2] + '.' + p[1] + '.' + p[0]; }
   function term(c) { return '(INT(' + c + ')*60+ROUND((' + c + '-INT(' + c + '))*100,0))'; }
   function hmFormula(m) { return 'INT((' + m + ')/60)+MOD(' + m + ',60)/100'; }
   function sumMinutes(arr) { return arr.reduce(function (a, b) { return a + b; }, 0); }
@@ -70,7 +74,9 @@
     var first = r0 + 4;
     var last = first + n - 1;
     var totalRow = first + n;
-    var monthText = MONTHS[data.m - 1] + ' ' + data.y;
+    var periodText = data.pn
+      ? 'період ' + data.pn + ' (' + isoToText(data.from) + ' – ' + isoToText(data.to) + ')'
+      : MONTHS[data.m - 1] + ' ' + data.y;
     var ranges = data.wr || [];
 
     // Title + hint
@@ -81,9 +87,9 @@
 
     ws.mergeCells(r0 + 1, 1, r0 + 1, K.last);
     put(ws, 'A' + (r0 + 1),
-      'Дані за ' + monthText + ' заповнені автоматично з трекера. Місячні підсумки рахуються автоматично. ' +
+      'Дані за ' + periodText + ' заповнені автоматично з трекера. Підсумки за 4 тижні рахуються автоматично. ' +
       '⏱ Час у форматі ГОД.ХВ: 0.40 = 40 хв, 1.20 = 1 год 20 хв (хвилини 00–59). ' +
-      'Тижні календарні (пн–нд): Тиж. 1 — тиждень першого запису в місяці, наступний починається з понеділка.',
+      'Тижні пн–нд; кожен період — 4 тижні поспіль, без прив\'язки до календарних місяців.',
       { italic: true, color: C.grayText, align: 'left', wrap: true, size: 10 });
     ws.getRow(r0 + 1).height = 30;
 
@@ -93,7 +99,7 @@
       [1, 3, '👤 Учасник та формат роботи', C.navy],
       [K.workFirst, K.sumW, '⏱ ОСНОВНА РОБОТА (год)', C.blue],
       [K.editFirst, K.sumE, '✏️ ПРАВКИ (год)', C.orange],
-      [K.total, K.count, '📊 ПІДСУМКИ МІСЯЦЯ', C.green],
+      [K.total, K.count, '📊 ПІДСУМКИ ЗА 4 ТИЖНІ', C.green],
     ].forEach(function (x) {
       for (var c = x[0]; c <= x[1]; c++) style(ws.getCell(g, c), { fill: x[3], color: C.white, bold: true });
       ws.mergeCells(g, x[0], g, x[1]);
@@ -108,13 +114,14 @@
     };
     head(1, "Ім'я", C.navy); head(2, 'Роль', C.navy); head(3, 'Формат роботи', C.navy);
     for (var i = 0; i < nW; i++) {
-      var label = 'Тиж. ' + (i + 1) + (ranges[i] ? '\n' + ranges[i] : '');
+      var num = data.wn ? data.wn[i] : i + 1;
+      var label = (num >= 1 ? 'Тиж. ' + num : 'До старту') + (ranges[i] ? '\n' + ranges[i] : '');
       head(K.workFirst + i, label, C.blue);
       head(K.editFirst + i, label, C.orange);
     }
-    head(K.sumW, 'Σ Осн. (міс.)', C.blue);
-    head(K.sumE, 'Σ Правок (міс.)', C.orange);
-    head(K.total, 'Σ Всього (міс.)', C.green);
+    head(K.sumW, 'Σ Осн. (4 тиж.)', C.blue);
+    head(K.sumE, 'Σ Правок (4 тиж.)', C.orange);
+    head(K.total, 'Σ Всього (4 тиж.)', C.green);
     head(K.pct, '% Правок', C.green);
     head(K.avg, 'Сер./тиж. (осн.)', C.green);
     head(K.count, 'К-сть форматів', C.green);

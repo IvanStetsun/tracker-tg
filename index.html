@@ -166,7 +166,7 @@
 'use strict';
 
 // Must match version.txt. A mismatch means this page came from a stale cache, so it reloads itself.
-const APP_VERSION = '2026-10-08.4';
+const APP_VERSION = '2026-10-08.6';
 
 function checkForUpdate() {
   fetch('version.txt?t=' + Date.now(), { cache: 'no-store' })
@@ -251,6 +251,39 @@ const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 
 const dayKey = (d) => `e${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
 const dayFromKey = (k) => new Date(+k.slice(1, 5), +k.slice(5, 7) - 1, +k.slice(7, 9));
 const parseJSON = (text, fallback) => { try { return text ? JSON.parse(text) : fallback; } catch (e) { return fallback; } };
+
+// ---------- Week numbering: Mon-Sun weeks counted continuously from meta.w0 ("YYYY-MM-DD", a Monday) ----------
+const mondayOf = (d) => { const s = startOfDay(d); return addDays(s, -((s.getDay() + 6) % 7)); };
+const isoDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const parseIso = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+function weekNo(date) {
+  const w0 = parseIso(meta.w0 || isoDate(mondayOf(new Date())));
+  const days = Math.round((Date.UTC(date.getFullYear(), date.getMonth(), date.getDate())
+    - Date.UTC(w0.getFullYear(), w0.getMonth(), w0.getDate())) / 86400000);
+  return Math.floor(days / 7) + 1;
+}
+
+function allDayKeys() {
+  return new Promise((resolve) => {
+    const local = [];
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(LOCAL_PREFIX + 'e')) local.push(k.slice(LOCAL_PREFIX.length));
+      }
+    } catch (e) {}
+    if (!Store.cloud) return resolve(local);
+    Store.cloud.getKeys((err, keys) => resolve(err || !keys ? local : [...new Set([...local, ...keys])]));
+  }).then((keys) => keys.filter((k) => /^e\d{8}$/.test(k)));
+}
+
+/** Week 1 = the week of the very first record (or the current week if nothing is recorded yet). */
+async function ensureWeekStart() {
+  if (meta.w0) return;
+  const earliest = (await allDayKeys()).sort()[0];
+  meta.w0 = isoDate(mondayOf(earliest ? dayFromKey(earliest) : new Date()));
+  saveMeta();
+}
 
 function rebuildIndex() {
   taskIndex.clear();
@@ -449,7 +482,7 @@ function homeHtml(r) {
   const runPid = r ? taskIndex.get(r.t).pid : null;
   return `
     <div class="top"><div>
-      <div class="date">${esc(weekdayDate(new Date()))}</div>
+      <div class="date">${esc(weekdayDate(new Date()))}${meta.w0 && weekNo(new Date()) >= 1 ? ` · период ${periodOf(new Date())}, неделя ${(weekNo(new Date()) - 1) % PERIOD_WEEKS + 1} из ${PERIOD_WEEKS}` : ''}</div>
       <div class="today">Сегодня: <span class="num" data-live="today-total"></span></div>
     </div></div>
     <div class="chips">
@@ -876,24 +909,36 @@ function openSettings() {
       <label class="field"><span>Роль</span><input type="text" id="s-role" maxlength="30" value="${esc(meta.role)}"></label>
     </div>
     <p class="note">Имя и роль попадут в первые колонки Excel-таблицы.</p>
+    <div class="group" style="margin-top:12px">
+      <label class="field"><span>Неделя 1 начинается</span><input type="date" id="s-w0" value="${esc(meta.w0 || '')}"></label>
+    </div>
+    <p class="note">С этой недели начинается период 1. Периоды идут подряд по 4 недели (пн–вс), без привязки к месяцам. Выбранная дата округляется до понедельника своей недели.</p>
     <div class="actions"><button class="btn-cancel" id="s-cancel">Отмена</button><button class="btn-save" id="s-save">Сохранить</button></div>`,
   () => {
     $('s-cancel').onclick = closeSheet;
     $('s-save').onclick = () => {
       meta.name = $('s-name').value.trim();
       meta.role = $('s-role').value.trim();
+      if ($('s-w0').value) meta.w0 = isoDate(mondayOf(parseIso($('s-w0').value)));
       saveMeta();
       haptic('success');
       closeSheet();
+      render();
     };
   });
 }
 
 // ---------- Excel export ----------
-let expMonth = null;
+// Reports cover periods of 4 consecutive Mon-Sun weeks counted from meta.w0, not calendar months:
+// period 1 = weeks 1-4, period 2 = weeks 5-8, ...
+const PERIOD_WEEKS = 4;
+let expPeriod = 1;
 let expToken = 0;
 
-const MONTHS_RU = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
+const periodOf = (date) => Math.max(1, Math.floor((weekNo(date) - 1) / PERIOD_WEEKS) + 1);
+const periodStart = (n) => addDays(parseIso(meta.w0 || isoDate(mondayOf(new Date()))), (n - 1) * PERIOD_WEEKS * 7);
+const dm = (d) => `${d.getDate()}.${pad(d.getMonth() + 1)}`;
+const dmRu = (d) => d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
 
 function toB64Url(obj) {
   const bytes = new TextEncoder().encode(JSON.stringify(obj));
@@ -902,33 +947,19 @@ function toB64Url(obj) {
   return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-/**
- * Minutes per task / kind / week for one month. Weeks end on Sunday and start on Monday.
- * Week 1 is the week of the first recorded day of the month (it runs from that day to the
- * first Sunday); the next week starts on the following Monday.
- */
-async function buildPayload(first) {
-  const y = first.getFullYear(), m = first.getMonth();
-  const count = new Date(y, m + 1, 0).getDate();
-  const dayList = Array.from({ length: count }, (_, i) => new Date(y, m, i + 1));
+/** Minutes per task / kind / week for one 4-week period. */
+async function buildPayload(n) {
+  const start = periodStart(n);
+  const dayList = Array.from({ length: PERIOD_WEEKS * 7 }, (_, i) => addDays(start, i));
   await loadDays(dayList.map(dayKey));
   const now = Date.now();
-
-  let firstIdx = dayList.findIndex((day) => entriesOf(day, now).length > 0);
-  if (firstIdx < 0) firstIdx = 0;                                       // nothing recorded yet
-  const offset = (dayList[firstIdx].getDay() + 6) % 7;                  // 0 = first day is a Monday
-  const weekOf = (i) => Math.floor((i - firstIdx + offset) / 7);        // i = zero-based day index
-  const nw = weekOf(count - 1) + 1;
-  const wr = Array.from({ length: nw }, (_, w) => {
-    const inWeek = dayList.map((_, i) => i).filter((i) => i >= firstIdx && weekOf(i) === w).map((i) => i + 1);
-    return inWeek[0] === inWeek[inWeek.length - 1] ? `${inWeek[0]}` : `${inWeek[0]}–${inWeek[inWeek.length - 1]}`;
-  });
+  const nw = PERIOD_WEEKS;
+  const wr = Array.from({ length: nw }, (_, w) => `${dm(dayList[w * 7])}–${dm(dayList[w * 7 + 6])}`);
   const zeros = () => Array(nw).fill(0);
 
   const acc = new Map();
   dayList.forEach((day, i) => {
-    if (i < firstIdx) return;
-    const week = weekOf(i);
+    const week = Math.floor(i / 7);
     for (const x of entriesOf(day, now)) {
       if (!acc.has(x.t)) acc.set(x.t, { w: zeros(), e: zeros() });
       acc.get(x.t)[x.k ? 'e' : 'w'][week] += (x.e - x.s) / 1000;
@@ -936,7 +967,8 @@ async function buildPayload(first) {
   });
   const toMin = (a) => a.map((s) => Math.round(s / 60));
   return {
-    y, m: m + 1, name: meta.name || tgName(), role: meta.role || '', nw, wr,
+    pn: n, from: isoDate(start), to: isoDate(dayList[dayList.length - 1]),
+    name: meta.name || tgName(), role: meta.role || '', nw, wr,
     p: meta.order.map((pid) => {
       const p = projects.get(pid);
       return { n: p.n, t: p.t.map(([tid, name]) => { const a = acc.get(tid) || { w: zeros(), e: zeros() }; return { n: name, w: toMin(a.w), e: toMin(a.e) }; }) };
@@ -945,8 +977,7 @@ async function buildPayload(first) {
 }
 
 function openExport() {
-  const today = new Date();
-  expMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+  expPeriod = periodOf(new Date());
   openSheet('Excel-таблица', '<div id="exp-body"></div>', renderExport);
 }
 
@@ -954,29 +985,30 @@ async function renderExport() {
   const token = ++expToken;
   const body = $('exp-body');
   if (!body) return;
-  const now = new Date();
-  const isCurrent = expMonth.getFullYear() === now.getFullYear() && expMonth.getMonth() === now.getMonth();
+  const current = periodOf(new Date());
+  const start = periodStart(expPeriod);
+  const end = addDays(start, PERIOD_WEEKS * 7 - 1);
   const switcher = `<div class="switcher">
-    <button id="x-prev" aria-label="Предыдущий месяц">‹</button>
-    <div class="title"><b>${MONTHS_RU[expMonth.getMonth()]}</b><span>${expMonth.getFullYear()}</span></div>
-    <button id="x-next" aria-label="Следующий месяц" ${isCurrent ? 'disabled' : ''}>›</button></div>`;
+    <button id="x-prev" aria-label="Предыдущий период" ${expPeriod <= 1 ? 'disabled' : ''}>‹</button>
+    <div class="title"><b>Период ${expPeriod}</b><span>${esc(dmRu(start))} – ${esc(dmRu(end))}${expPeriod === current ? ' · сейчас' : ''}</span></div>
+    <button id="x-next" aria-label="Следующий период" ${expPeriod >= current ? 'disabled' : ''}>›</button></div>`;
   body.innerHTML = `${switcher}<p class="note">Считаю…</p>`;
   const wire = () => {
-    $('x-prev').onclick = () => { expMonth = new Date(expMonth.getFullYear(), expMonth.getMonth() - 1, 1); renderExport(); };
-    $('x-next').onclick = () => { expMonth = new Date(expMonth.getFullYear(), expMonth.getMonth() + 1, 1); renderExport(); };
+    $('x-prev').onclick = () => { expPeriod = Math.max(1, expPeriod - 1); renderExport(); };
+    $('x-next').onclick = () => { expPeriod = Math.min(current, expPeriod + 1); renderExport(); };
   };
   wire();
 
-  const payload = await buildPayload(expMonth);
+  const payload = await buildPayload(expPeriod);
   if (token !== expToken || !$('exp-body')) return;
   const total = (p) => p.t.reduce((a, t) => a + t.w.reduce((x, y) => x + y, 0) + t.e.reduce((x, y) => x + y, 0), 0);
   const all = payload.p.reduce((a, p) => a + total(p), 0);
   body.innerHTML = `${switcher}
     <div class="group">
       ${payload.p.map((p) => `<div class="row"><span class="grow"><div>${esc(p.n)}</div></span><span class="val num">${short(total(p) * 60)}</span></div>`).join('')}
-      <div class="row total"><span class="grow">Всего за месяц</span><span class="val num">${short(all * 60)}</span></div>
+      <div class="row total"><span class="grow">Всего за 4 недели</span><span class="val num">${short(all * 60)}</span></div>
     </div>
-    <p class="note">Таблица откроется в браузере телефона — там нажмите «Скачать». Время считается в формате ГОД.ХВ, как в вашем образце: по неделям (пн–вс), отдельно «Работа» и «Правки». Неделя 1 — та, в которой в этом месяце появилась первая запись; следующая начинается с понедельника.</p>
+    <p class="note">Таблица откроется в браузере телефона — там нажмите «Скачать». В ней 4 колонки «Тиж. 1–4» — недели этого периода (пн–вс), отдельно «Работа» и «Правки». Время в формате ГОД.ХВ, как в вашем образце.</p>
     <button class="primary" id="x-open">Открыть таблицу</button>`;
   wire();
   $('x-open').onclick = () => {
@@ -1019,6 +1051,7 @@ async function init() {
     else { saveMeta(); }
   }
   if (!meta.name) { meta.name = tgName(); }
+  await ensureWeekStart();
   await loadDays([dayKey(new Date())]);
   render();
 

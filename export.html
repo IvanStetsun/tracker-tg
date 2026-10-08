@@ -79,22 +79,27 @@ function loadScript(src) {
     return fail('Нет данных для таблицы. Откройте эту страницу кнопкой «Excel» в приложении.');
   }
 
-  const monthName = `${MONTHS[data.m - 1]} ${data.y}`;
-  $('sub').textContent = monthName;
-  document.title = `Трекер ${monthName}`;
+  const isoToText = (s) => s.split('-').reverse().join('.');
+  const periodName = data.pn
+    ? `Период ${data.pn}: ${isoToText(data.from)} – ${isoToText(data.to)}`
+    : `${MONTHS[data.m - 1]} ${data.y}`;
+  $('sub').textContent = periodName;
+  document.title = `Трекер · ${periodName}`;
 
   let all = 0;
   $('summary').innerHTML = data.p.map((p) => {
     const t = sum(p.t.map((x) => sum(x.w) + sum(x.e)));
     all += t;
     return `<div class="row"><span class="n">${esc(p.n)}</span><span class="v">${short(t)}</span></div>`;
-  }).join('') + `<div class="row total"><span class="n">Всего за месяц</span><span class="v">${short(all)}</span></div>`;
+  }).join('') + `<div class="row total"><span class="n">${data.pn ? 'Всего за 4 недели' : 'Всего за месяц'}</span><span class="v">${short(all)}</span></div>`;
 
   if (typeof ExcelJS === 'undefined' || !window.TrackerXlsx) {
     return fail('Не удалось загрузить библиотеку Excel. Проверьте интернет и обновите страницу.');
   }
 
-  const fileName = `Трекер_${data.y}-${String(data.m).padStart(2, '0')}.xlsx`;
+  const fileName = data.pn
+    ? `Трекер_период-${data.pn}_${data.from}.xlsx`
+    : `Трекер_${data.y}-${String(data.m).padStart(2, '0')}.xlsx`;
   let file;
   try {
     const buffer = await TrackerXlsx.buildWorkbook(ExcelJS, data).xlsx.writeBuffer();
