@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Excel-таблица</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
-<script src="xlsx-build.js"></script>
 <style>
   :root { --bg: #f2f2f7; --card: #fff; --text: #000; --hint: #8e8e93; --accent: #0a84ff; --sep: rgba(127,127,127,.2); }
   @media (prefers-color-scheme: dark) { :root { --bg: #000; --card: #1c1c1e; --text: #fff; } }
@@ -59,7 +58,19 @@ function fail(text) {
   $('note').textContent = text;
 }
 
+/** The builder is loaded with the app version in its URL, so a stale cached copy is never used. */
+function loadScript(src) {
+  return new Promise((resolve) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = resolve;
+    document.head.appendChild(s);
+  });
+}
+
 (async function main() {
+  await loadScript('xlsx-build.js?v=' + encodeURIComponent(new URLSearchParams(location.search).get('v') || Date.now()));
   let data;
   try {
     data = decode(location.hash.slice(1));

@@ -165,6 +165,26 @@
 <script>
 'use strict';
 
+// Must match version.txt. A mismatch means this page came from a stale cache, so it reloads itself.
+const APP_VERSION = '2026-10-08.3';
+
+function checkForUpdate() {
+  fetch('version.txt?t=' + Date.now(), { cache: 'no-store' })
+    .then((r) => (r.ok ? r.text() : ''))
+    .then((text) => {
+      const latest = text.trim();
+      if (!latest || latest === APP_VERSION) return;
+      try {
+        if (sessionStorage.getItem('tracker-update') === latest) return;   // never loop
+        sessionStorage.setItem('tracker-update', latest);
+      } catch (e) { return; }
+      const url = new URL(location.href);
+      url.searchParams.set('v', latest);   // new URL = fresh download; the hash keeps Telegram's launch data
+      location.replace(url.href);
+    })
+    .catch(() => {});
+}
+
 // ---------- Telegram ----------
 const W = window.Telegram && window.Telegram.WebApp;
 const inTelegram = !!(W && W.initData);
@@ -956,7 +976,7 @@ async function renderExport() {
     <button class="primary" id="x-open">Открыть таблицу</button>`;
   wire();
   $('x-open').onclick = () => {
-    const url = new URL('export.html', location.href).href + '#' + toB64Url(payload);
+    const url = new URL('export.html?v=' + APP_VERSION, location.href).href + '#' + toB64Url(payload);
     if (inTelegram && W.openLink) W.openLink(url); else window.open(url, '_blank');
   };
 }
@@ -1000,6 +1020,7 @@ async function init() {
 
   setInterval(tick, 1000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
+  checkForUpdate();
 }
 
 init();
