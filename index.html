@@ -141,6 +141,11 @@
   .swatch.on { border-color: var(--text); }
   .toast { position: fixed; left: 16px; right: 16px; bottom: calc(100px + var(--safe-bottom)); max-width: 420px; margin: 0 auto; z-index: 20;
     padding: 12px 16px; border-radius: 14px; background: rgba(40,40,40,.95); color: #fff; font-size: 14px; text-align: center; animation: rise .25s ease; }
+  .sync { font-size: 12px; color: var(--hint); margin-top: 4px; min-height: 16px; }
+  .sync.warn { color: var(--warn); }
+  .empty-start { background: var(--card); border-radius: 18px; padding: 16px; margin-bottom: 10px; }
+  .empty-start b { display: block; font-size: 17px; margin-bottom: 4px; }
+  .empty-start span { color: var(--hint); font-size: 14px; }
   @keyframes fade { from { opacity: 0; } }
   @keyframes up { from { transform: translateY(40px); opacity: .4; } }
 </style>
@@ -166,7 +171,7 @@
 'use strict';
 
 // Must match version.txt. A mismatch means this page came from a stale cache, so it reloads itself.
-const APP_VERSION = '2026-10-08.8';
+const APP_VERSION = '2026-10-09.1';
 
 function checkForUpdate() {
   fetch('version.txt?t=' + Date.now(), { cache: 'no-store' })
@@ -189,7 +194,8 @@ function checkForUpdate() {
 const W = window.Telegram && window.Telegram.WebApp;
 const inTelegram = !!(W && W.initData);
 const supports = (v) => inTelegram && W.isVersionAtLeast && W.isVersionAtLeast(v);
-const tgName = () => (W && W.initDataUnsafe && W.initDataUnsafe.user && W.initDataUnsafe.user.first_name) || '';
+const tgUser = (W && W.initDataUnsafe && W.initDataUnsafe.user) || null;
+const tgName = () => (tgUser && tgUser.first_name) || '';
 
 function haptic(kind) {
   if (!supports('6.1')) return;
@@ -197,42 +203,12 @@ function haptic(kind) {
   else W.HapticFeedback.impactOccurred(kind || 'light');
 }
 
-// ---------- Storage: Telegram CloudStorage + local cache ----------
-const LOCAL_PREFIX = 'tracker2:';
-const Store = {
-  cloud: supports('6.9') ? W.CloudStorage : null,
-  localGet(key) { try { return localStorage.getItem(LOCAL_PREFIX + key); } catch (e) { return null; } },
-  localSet(key, value) { try { localStorage.setItem(LOCAL_PREFIX + key, value); } catch (e) {} },
-  localRemove(key) { try { localStorage.removeItem(LOCAL_PREFIX + key); } catch (e) {} },
-  getMany(keys) {
-    return new Promise((resolve) => {
-      const local = () => Object.fromEntries(keys.map((k) => [k, Store.localGet(k)]));
-      if (!Store.cloud || !keys.length) return resolve(local());
-      Store.cloud.getItems(keys, (err, values) => {
-        if (err || !values) return resolve(local());
-        const out = {};
-        for (const k of keys) {
-          out[k] = values[k] ? values[k] : Store.localGet(k);
-          if (values[k]) Store.localSet(k, values[k]);
-        }
-        resolve(out);
-      });
-    });
-  },
-  set(key, value) {
-    Store.localSet(key, value);
-    if (Store.cloud) Store.cloud.setItem(key, value, (err) => { if (err) { console.warn('CloudStorage', err); toast('Не вдалося зберегти в хмару Telegram'); } });
-  },
-  remove(key) {
-    Store.localRemove(key);
-    if (Store.cloud) Store.cloud.removeItem(key, () => {});
-  },
-};
-
-// ---------- Data model ----------
-// meta:     { order:[projectId], next:int, run:{t,k,s}|null, name, role (default role), w0, mig }
-// project:  key "p<id>" -> { n:name, c:colorIndex, r:role ('' = use meta.role), t:[[taskId, name], ...] }
-// day:      key "eYYYYMMDD" -> [[taskId, kind(0 work / 1 edits), offsetSec, durationSec], ...] (offset from local midnight)
+// ---------- Settings ----------
+const DEFAULT_API = 'https://tracker-bot.stecunivan.workers.dev';
+const API_BASE = (() => { try { return localStorage.getItem('tracker:api') || DEFAULT_API; } catch (e) { return DEFAULT_API; } })();
+const BOT_USERNAME = 'Timemenedgerbot';
+const TEAM_W0 = '2026-10-05';          // Monday of week 1 for the whole team
+const PERIOD_WEEKS = 4;
 const COLORS = ['#0A84FF', '#FF9F0A', '#30D158', '#BF5AF2', '#FF375F', '#40C8E0',
                 '#5E5CE6', '#FF453A', '#E5B800', '#2FB8A8', '#AC8E68', '#64D2FF'];
 const KIND = ['Робота', 'Правки'];
@@ -240,82 +216,339 @@ const DEFAULT_TASKS = ['Бриф / постановка задачі', 'Конт
 const DEFAULT_PROJECTS = ['Клуб Сиру', 'Канів', "Lel'", 'Ambassador', 'Чорна Карта', 'Аквамарин', 'Філадельфія'];
 const TEXTS_TASK = 'Написання текстів';   // the only task of the 7th project
 const FORGOTTEN_AFTER = 8 * 3600 * 1000;
+const TOMBSTONE_DAYS = 45;                // deleted entries are kept this long so other devices learn about the deletion
 
-let meta = { order: [], next: 1, run: null, name: '', role: 'Лід' };
-const projects = new Map();   // id -> { id, n, c, t:[[tid,name]] }
-const taskIndex = new Map();  // tid -> { pid, name }
-const days = new Map();       // key -> [{t,k,s,e}] (absolute ms)
-const loadingDays = new Set();
-
+// ---------- Data model ----------
+// Everything is saved on the phone first (localStorage), then sent to the server when there is internet.
+//   meta          { order:[projectId], name, role, run:{t,k,s}|null, u, ru, mig }   u = settings changed, ru = timer changed
+//   p<projectId>  { n:name, c:color, r:role, t:[[taskId, name, deleted?]], u, x:deleted? }
+//   eYYYYMMDD     [[entryId, taskId, kind(0 work / 1 edits), offsetSec, durationSec, updatedSec, deleted?], ...]
 const pad = (n) => String(n).padStart(2, '0');
 const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
 const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
 const dayKey = (d) => `e${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
 const dayFromKey = (k) => new Date(+k.slice(1, 5), +k.slice(5, 7) - 1, +k.slice(7, 9));
 const parseJSON = (text, fallback) => { try { return text ? JSON.parse(text) : fallback; } catch (e) { return fallback; } };
-
-// ---------- Week numbering: Mon-Sun weeks counted continuously from meta.w0 ("YYYY-MM-DD", a Monday) ----------
-const mondayOf = (d) => { const s = startOfDay(d); return addDays(s, -((s.getDay() + 6) % 7)); };
+const nowSec = () => Math.floor(Date.now() / 1000);
 const isoDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const parseIso = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
-function weekNo(date) {
-  const w0 = parseIso(meta.w0 || isoDate(mondayOf(new Date())));
-  const days = Math.round((Date.UTC(date.getFullYear(), date.getMonth(), date.getDate())
-    - Date.UTC(w0.getFullYear(), w0.getMonth(), w0.getDate())) / 86400000);
-  return Math.floor(days / 7) + 1;
-}
 
-function allDayKeys() {
-  return new Promise((resolve) => {
-    const local = [];
+const defaultMeta = () => ({ order: [], name: '', role: 'Лід', run: null, u: 0, ru: 0, mig: 1 });
+let meta = defaultMeta();
+const projects = new Map();   // id -> { id, n, c, r, t:[[tid, name, deleted?]], u, x }
+const taskIndex = new Map();  // tid -> { pid, name, del }  (deleted tasks stay here: their time still counts)
+const days = new Map();       // key -> [{ id, t, k, s, e, u, x }] (absolute ms)
+
+// ---------- Phone storage ----------
+const UID = tgUser && tgUser.id ? String(tgUser.id) : 'local';
+const LP = `tracker3:${UID}:`;
+const Local = {
+  get(k) { try { return localStorage.getItem(LP + k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(LP + k, v); return true; } catch (e) { return false; } },
+  docKeys() {
+    const out = [];
     try {
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);
-        if (k && k.startsWith(LOCAL_PREFIX + 'e')) local.push(k.slice(LOCAL_PREFIX.length));
+        if (k && k.startsWith(LP) && k[LP.length] !== '_') out.push(k.slice(LP.length));
       }
     } catch (e) {}
-    if (!Store.cloud) return resolve(local);
-    Store.cloud.getKeys((err, keys) => resolve(err || !keys ? local : [...new Set([...local, ...keys])]));
-  }).then((keys) => keys.filter((k) => /^e\d{8}$/.test(k)));
-}
+    return out;
+  },
+};
 
-/** Week 1 = the week of the very first record (or the current week if nothing is recorded yet). */
-async function ensureWeekStart() {
-  if (meta.w0) return;
-  const earliest = (await allDayKeys()).sort()[0];
-  meta.w0 = isoDate(mondayOf(earliest ? dayFromKey(earliest) : new Date()));
-  saveMeta();
+/** Documents changed on the phone that the server has not confirmed yet. Survives closing the app. */
+const Outbox = {
+  list() { return parseJSON(Local.get('_dirty'), []); },
+  add(key) { const l = Outbox.list(); if (!l.includes(key)) { l.push(key); Local.set('_dirty', JSON.stringify(l)); } },
+  remove(key) { Local.set('_dirty', JSON.stringify(Outbox.list().filter((k) => k !== key))); },
+};
+const revOf = (key) => Number(Local.get('_rev:' + key)) || 0;
+const setRev = (key, rev) => Local.set('_rev:' + key, String(rev));
+
+let storageWarned = false;
+function putDoc(key, value) {
+  if (!Local.set(key, value) && !storageWarned) {
+    storageWarned = true;
+    toast('Пам\'ять браузера переповнена — зміни можуть не зберегтися');
+  }
+  Outbox.add(key);
+  scheduleSync(1500);
 }
 
 function rebuildIndex() {
   taskIndex.clear();
-  for (const p of projects.values()) for (const [tid, name] of p.t) taskIndex.set(tid, { pid: p.id, name });
+  for (const p of projects.values()) {
+    for (const [tid, name, del] of p.t) taskIndex.set(tid, { pid: p.id, name, del: !!(del || p.x) });
+  }
+}
+const visibleProjects = () => meta.order.filter((id) => projects.has(id) && !projects.get(id).x);
+const liveTasks = (p) => p.t.filter((x) => !x[2]);
+const projectDoc = (p) => ({ n: p.n, c: p.c, r: p.r || '', t: p.t, u: p.u || 0, ...(p.x ? { x: 1 } : {}) });
+
+function saveMeta() { meta.u = Date.now(); putDoc('meta', JSON.stringify(meta)); }
+function saveRun() { meta.ru = Date.now(); putDoc('meta', JSON.stringify(meta)); }
+function saveProject(p) { p.u = Date.now(); putDoc('p' + p.id, JSON.stringify(projectDoc(p))); rebuildIndex(); }
+
+let lastId = 0;
+/** Unique across devices: time-based with a random tail. */
+function newId() {
+  let id = Date.now() * 100 + Math.floor(Math.random() * 100);
+  if (id <= lastId) id = lastId + 1;
+  lastId = id;
+  return id;
 }
 
-function saveMeta() { Store.set('meta', JSON.stringify(meta)); }
-function saveProject(p) { Store.set('p' + p.id, JSON.stringify({ n: p.n, c: p.c, t: p.t, r: p.r || '' })); rebuildIndex(); }
-const newId = () => meta.next++;
+/** Same id for the same old entry on every device (used when converting data of the previous version). */
+function stableId(text) {
+  let h1 = 0x811c9dc5, h2 = 7;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 16777619) >>> 0;
+    h2 = (Math.imul(h2, 31) + c) >>> 0;
+  }
+  return (h1 % 2097152) * 4294967296 + h2;
+}
+
+// ---------- Days ----------
+const fromStored = (base) => ([id, t, k, off, dur, u, x]) =>
+  ({ id, t, k, s: base + off * 1000, e: base + (off + dur) * 1000, u: u || 0, x: x ? 1 : 0 });
+
+function loadDay(key) {
+  if (!days.has(key)) days.set(key, parseJSON(Local.get(key), []).map(fromStored(dayFromKey(key).getTime())));
+  return days.get(key);
+}
+async function loadDays(keys) { keys.forEach(loadDay); }
+
+function saveDay(key) {
+  const base = dayFromKey(key).getTime();
+  const keepSince = nowSec() - TOMBSTONE_DAYS * 86400;
+  const list = (days.get(key) || []).filter((e) => !e.x || e.u > keepSince);
+  list.sort((a, b) => a.s - b.s);
+  days.set(key, list);
+  putDoc(key, JSON.stringify(list.map((e) => {
+    const row = [e.id, e.t, e.k, Math.round((e.s - base) / 1000), Math.round((e.e - e.s) / 1000), e.u];
+    if (e.x) row.push(1);
+    return row;
+  })));
+}
+
+/** Stores [startMs, endMs) for a task, split at local midnights. */
+async function addInterval(t, k, startMs, endMs) {
+  const keys = new Set();
+  let cur = startMs;
+  while (cur < endMs) {
+    const next = addDays(startOfDay(new Date(cur)), 1).getTime();
+    const end = Math.min(endMs, next);
+    if (end - cur >= 1000) {
+      const key = dayKey(new Date(cur));
+      loadDay(key).push({ id: newId(), t, k, s: cur, e: end, u: nowSec(), x: 0 });
+      keys.add(key);
+    }
+    cur = end;
+  }
+  keys.forEach(saveDay);
+}
+
+/** All entries of a local day (stored + the running timer clipped to that day). */
+function entriesOf(day, now) {
+  const from = startOfDay(day).getTime();
+  const to = addDays(startOfDay(day), 1).getTime();
+  const list = loadDay(dayKey(day)).map((e, idx) => ({ t: e.t, k: e.k, s: e.s, e: e.e, x: e.x, idx }))
+    .filter((e) => !e.x);
+  const r = meta.run;
+  if (r && r.s < to && now > from) {
+    const s = Math.max(r.s, from), e = Math.min(now, to);
+    if (e > s) list.push({ t: r.t, k: r.k, s, e, run: true });
+  }
+  return list.filter((x) => taskIndex.has(x.t)).sort((a, b) => a.s - b.s);
+}
+const sumOf = (list, pred) => list.reduce((a, x) => (pred(x) ? a + (x.e - x.s) / 1000 : a), 0);
+
+// ---------- Merging (two phones, or a phone that was offline) ----------
+/** Combine the phone's and the server's version of one document without losing anything. */
+function mergeDoc(key, localStr, serverStr) {
+  if (serverStr == null) return localStr;
+  if (localStr == null) return serverStr;
+  const a = parseJSON(localStr, null), b = parseJSON(serverStr, null);
+  if (a == null) return serverStr;
+  if (b == null) return localStr;
+  let m;
+  if (key === 'meta') {
+    const base = (a.u || 0) >= (b.u || 0) ? a : b;
+    const other = base === a ? b : a;
+    const run = (a.ru || 0) >= (b.ru || 0) ? a : b;
+    // projects are never removed from the order (deleting only hides them), so the union loses nothing
+    const order = (base.order || []).concat((other.order || []).filter((id) => !(base.order || []).includes(id)));
+    m = Object.assign({}, base, { order, run: run.run || null, ru: run.ru || 0, mig: Math.max(a.mig || 0, b.mig || 0) });
+  } else if (key[0] === 'p') {
+    m = (a.u || 0) >= (b.u || 0) ? a : b;
+  } else {
+    // entries: union by id; for the same entry the newer edit (or deletion) wins
+    const byId = new Map();
+    for (const row of b) byId.set(row[0], row);
+    for (const row of a) {
+      const o = byId.get(row[0]);
+      if (!o || (row[5] || 0) > (o[5] || 0) || ((row[5] || 0) === (o[5] || 0) && row[6] && !o[6])) byId.set(row[0], row);
+    }
+    m = [...byId.values()].sort((x, y) => x[3] - y[3]);
+  }
+  return JSON.stringify(m);
+}
+
+/** Put a merged/received document on the phone and into memory (without queueing it again). */
+function applyDoc(key, str) {
+  Local.set(key, str);
+  if (key === 'meta') {
+    meta = Object.assign(defaultMeta(), parseJSON(str, {}));
+  } else if (key[0] === 'p') {
+    const p = parseJSON(str, null);
+    if (p && Array.isArray(p.t)) projects.set(+key.slice(1), Object.assign({ id: +key.slice(1) }, p));
+    rebuildIndex();
+  } else if (days.has(key)) {
+    days.delete(key);
+    loadDay(key);
+  }
+}
+
+// ---------- Sync with the server ----------
+const SyncState = { status: inTelegram ? 'idle' : 'local', timer: 0, running: false, again: false };
+
+function scheduleSync(delay) {
+  clearTimeout(SyncState.timer);
+  SyncState.timer = setTimeout(syncNow, delay);
+  updateSyncPill();
+}
+
+async function api(path, body) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  try {
+    // text/plain keeps it a "simple" cross-origin request (no preflight), which is faster on bad networks
+    const r = await fetch(API_BASE + path, {
+      method: 'POST', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(body), signal: ctrl.signal,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.ok) { const err = new Error(data.error || 'HTTP ' + r.status); err.status = r.status; throw err; }
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function syncNow() {
+  if (!inTelegram) { SyncState.status = 'local'; updateSyncPill(); return; }
+  if (SyncState.running) { SyncState.again = true; return; }
+  if (navigator.onLine === false) { SyncState.status = 'offline'; updateSyncPill(); return; }
+  SyncState.running = true;
+  SyncState.status = 'syncing';
+  updateSyncPill();
+  let changed = false;
+  try {
+    for (let round = 0; round < 6; round++) {
+      const push = {}, sent = {};
+      for (const key of Outbox.list().slice(0, 80)) {
+        const value = Local.get(key);
+        if (value == null) { Outbox.remove(key); continue; }
+        push[key] = { value, base: revOf(key) };
+        sent[key] = value;
+      }
+      const res = await api('/api/sync', { initData: W.initData, push, since: Number(Local.get('_cursor')) || 0 });
+
+      for (const [key, r] of Object.entries(res.results || {})) {
+        if (r.error) { Outbox.remove(key); continue; }
+        if (r.conflict) {
+          // someone else changed it first: merge, keep what is new on both sides
+          const merged = mergeDoc(key, Local.get(key), r.value);
+          setRev(key, r.rev);
+          if (merged !== Local.get(key)) { applyDoc(key, merged); changed = true; }
+          if (merged === r.value) Outbox.remove(key);
+        } else {
+          setRev(key, r.rev);
+          if (Local.get(key) === sent[key]) Outbox.remove(key);
+        }
+      }
+      for (const ch of res.changes || []) {
+        if (revOf(ch.key) >= ch.rev) continue;
+        const local = Local.get(ch.key);
+        const merged = local == null ? ch.value : mergeDoc(ch.key, local, ch.value);
+        setRev(ch.key, ch.rev);
+        if (merged !== local) { applyDoc(ch.key, merged); changed = true; }
+        if (merged !== ch.value) Outbox.add(ch.key);
+      }
+      Local.set('_cursor', String(res.cursor || 0));
+      if (!res.more && !Outbox.list().length) break;
+    }
+    SyncState.status = Outbox.list().length ? 'pending' : 'ok';
+  } catch (e) {
+    SyncState.status = e.status === 401 ? 'auth' : (e.status ? 'error' : 'offline');
+    scheduleSync(30000);
+  } finally {
+    SyncState.running = false;
+    updateSyncPill();
+    if (changed) render();
+    if (SyncState.again) { SyncState.again = false; scheduleSync(500); }
+  }
+}
+
+function syncText() {
+  const n = Outbox.list().length;
+  const waiting = n ? ` · ${n} ${n === 1 ? 'зміна чекає' : n < 5 ? 'зміни чекають' : 'змін чекають'}` : '';
+  switch (SyncState.status) {
+    case 'local': return '';
+    case 'syncing': return '⟳ Синхронізація…';
+    case 'offline': return `📴 Немає зв'язку${waiting} — дані на телефоні`;
+    case 'error': return `⚠ Сервер недоступний${waiting} — дані на телефоні`;
+    case 'auth': return '⚠ Відкрийте трекер заново з Telegram';
+    default: return n ? `⟳ Зберігаю${waiting}` : '✓ Збережено';
+  }
+}
+
+function updateSyncPill() {
+  const text = syncText();
+  const warn = ['offline', 'error', 'auth'].includes(SyncState.status);
+  document.querySelectorAll('.sync').forEach((el) => {
+    if (el.textContent !== text) el.textContent = text;
+    el.classList.toggle('warn', warn);
+  });
+}
+
+// ---------- Week numbering: Mon-Sun weeks counted from TEAM_W0, reports per 4 weeks ----------
+function weekNo(date) {
+  const w0 = parseIso(TEAM_W0);
+  const n = Math.round((Date.UTC(date.getFullYear(), date.getMonth(), date.getDate())
+    - Date.UTC(w0.getFullYear(), w0.getMonth(), w0.getDate())) / 86400000);
+  return Math.floor(n / 7) + 1;
+}
+
+// ---------- First start, previous version ----------
+const DARINA_ID = '416042979';   // her projects were set up in advance; everyone else starts empty
 
 function seedDefaults() {
-  meta = { order: [], next: 1, run: null, name: tgName(), role: 'Лід', mig: 1 };
+  // lowest timestamps — real data from the server (another device) always wins
+  meta = Object.assign(defaultMeta(), { name: tgName(), u: 1, ru: 1, mig: 1 });
   projects.clear();
+  if (UID !== DARINA_ID) {
+    rebuildIndex();
+    putDoc('meta', JSON.stringify(meta));
+    return;
+  }
+  // the same ids on every device of hers
+  let id = 1;
   DEFAULT_PROJECTS.forEach((name, i) => {
-    const id = newId();
-    const tasks = i === 6 ? [TEXTS_TASK] : DEFAULT_TASKS;
-    projects.set(id, { id, n: name, c: i, r: '', t: tasks.map((t) => [newId(), t]) });
-    meta.order.push(id);
+    const pid = id++;
+    const tasks = (i === 6 ? [TEXTS_TASK] : DEFAULT_TASKS).map((t) => [id++, t]);
+    projects.set(pid, { id: pid, n: name, c: i, r: '', t: tasks, u: 1 });
+    meta.order.push(pid);
   });
   rebuildIndex();
-  saveMeta();
-  for (const p of projects.values()) saveProject(p);
+  putDoc('meta', JSON.stringify(meta));
+  for (const p of projects.values()) putDoc('p' + p.id, JSON.stringify(projectDoc(p)));
 }
 
-/**
- * One-time update for people who opened the app before the real project names existed:
- * untouched "Проект N" names get the real names, and an untouched 7th project keeps only "Написання текстів".
- */
+/** Old "Проект N" names get the real names once; an untouched 7th project keeps only "Написання текстів". */
 function migrateDefaults() {
-  if (meta.mig >= 1) return;
+  if (meta.mig >= 1 || UID !== DARINA_ID) return;   // everyone else keeps their data exactly as it is
   meta.order.forEach((pid, i) => {
     const p = projects.get(pid);
     if (!p || i >= DEFAULT_PROJECTS.length) return;
@@ -328,72 +561,70 @@ function migrateDefaults() {
   saveMeta();
 }
 
-async function loadAll() {
-  const m = parseJSON((await Store.getMany(['meta'])).meta, null);
+function loadFromPhone() {
+  const m = parseJSON(Local.get('meta'), null);
   if (!m || !Array.isArray(m.order)) return false;
-  meta = Object.assign({ next: 1, run: null, name: '', role: 'Лід' }, m);
-  const values = await Store.getMany(meta.order.map((id) => 'p' + id));
+  meta = Object.assign(defaultMeta(), m);
   projects.clear();
-  meta.order = meta.order.filter((id) => {
-    const p = parseJSON(values['p' + id], null);
-    if (!p || !Array.isArray(p.t)) return false;
-    projects.set(id, { id, n: p.n, c: p.c || 0, t: p.t, r: p.r || '' });
-    return true;
-  });
+  for (const key of Local.docKeys()) {
+    if (!/^p\d+$/.test(key)) continue;
+    const p = parseJSON(Local.get(key), null);
+    if (p && Array.isArray(p.t)) projects.set(+key.slice(1), Object.assign({ id: +key.slice(1) }, p));
+  }
+  days.clear();
   rebuildIndex();
   return true;
 }
 
-async function loadDays(keys) {
-  const missing = keys.filter((k) => !days.has(k));
-  if (!missing.length) return;
-  const values = await Store.getMany(missing);
-  for (const k of missing) {
-    if (days.has(k)) continue;
-    const base = dayFromKey(k).getTime();
-    const list = parseJSON(values[k], []).map(([t, kind, off, dur]) => ({ t, k: kind, s: base + off * 1000, e: base + (off + dur) * 1000 }));
-    days.set(k, list);
-  }
-}
+const withTimeout = (promise, ms, fallback) =>
+  Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve(fallback), ms))]);
 
-function saveDay(key) {
-  const list = days.get(key) || [];
-  list.sort((a, b) => a.s - b.s);
-  const base = dayFromKey(key).getTime();
-  const json = JSON.stringify(list.map((e) => [e.t, e.k, Math.round((e.s - base) / 1000), Math.round((e.e - e.s) / 1000)]));
-  if (json.length > 4000) toast('За цей день забагато записів — частина може не зберегтися в хмарі');
-  Store.set(key, json);
-}
-
-/** Stores [startMs, endMs) for a task, split at local midnights. */
-async function addInterval(t, k, startMs, endMs) {
-  const pieces = [];
-  let cur = startMs;
-  while (cur < endMs) {
-    const next = addDays(startOfDay(new Date(cur)), 1).getTime();
-    const end = Math.min(endMs, next);
-    if (end - cur >= 1000) pieces.push({ key: dayKey(new Date(cur)), entry: { t, k, s: cur, e: end } });
-    cur = end;
+/** Data of the previous version (phone cache + Telegram cloud) becomes the new format. */
+async function migrateFromV2() {
+  const oldLocal = (k) => { try { return localStorage.getItem('tracker2:' + k); } catch (e) { return null; } };
+  const keys = new Set();
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith('tracker2:')) keys.add(k.slice(9));
+    }
+  } catch (e) {}
+  const cloud = {};
+  if (supports('6.9')) {
+    const cloudKeys = await withTimeout(new Promise((res) => W.CloudStorage.getKeys((err, v) => res(err ? [] : v || []))), 4000, []);
+    const wanted = cloudKeys.filter((k) => k === 'meta' || /^p\d+$/.test(k) || /^e\d{8}$/.test(k));
+    for (let i = 0; i < wanted.length; i += 50) {
+      const chunk = wanted.slice(i, i + 50);
+      Object.assign(cloud, await withTimeout(new Promise((res) => W.CloudStorage.getItems(chunk, (err, v) => res(err ? {} : v || {}))), 4000, {}));
+    }
+    wanted.forEach((k) => keys.add(k));
   }
-  const keys = [...new Set(pieces.map((x) => x.key))];
-  await loadDays(keys);
-  for (const { key, entry } of pieces) days.get(key).push(entry);
-  keys.forEach(saveDay);
-}
+  const read = (k) => cloud[k] || oldLocal(k);
+  const old = parseJSON(read('meta'), null);
+  if (!old || !Array.isArray(old.order)) return false;
 
-/** All entries of a local day (stored + the running timer clipped to that day). */
-function entriesOf(day, now) {
-  const from = startOfDay(day).getTime();
-  const to = addDays(startOfDay(day), 1).getTime();
-  const list = (days.get(dayKey(day)) || []).map((e, idx) => ({ t: e.t, k: e.k, s: e.s, e: e.e, idx }));
-  const r = meta.run;
-  if (r && r.s < to && now > from) {
-    const s = Math.max(r.s, from), e = Math.min(now, to);
-    if (e > s) list.push({ t: r.t, k: r.k, s, e, run: true });
+  meta = Object.assign(defaultMeta(), {
+    order: old.order, name: old.name || tgName(), role: old.role || 'Лід', run: old.run || null, u: 1, ru: 1, mig: old.mig || 0,
+  });
+  projects.clear();
+  for (const id of old.order) {
+    const p = parseJSON(read('p' + id), null);
+    if (p && Array.isArray(p.t)) {
+      projects.set(id, { id, n: p.n, c: p.c || 0, r: p.r || '', t: p.t.map(([tid, name]) => [tid, name]), u: 1 });
+    }
   }
-  return list.filter((x) => taskIndex.has(x.t)).sort((a, b) => a.s - b.s);
+  meta.order = meta.order.filter((id) => projects.has(id));
+  rebuildIndex();
+  putDoc('meta', JSON.stringify(meta));
+  for (const p of projects.values()) putDoc('p' + p.id, JSON.stringify(projectDoc(p)));
+  for (const key of keys) {
+    if (!/^e\d{8}$/.test(key)) continue;
+    const rows = parseJSON(read(key), []);
+    if (!rows.length) continue;
+    putDoc(key, JSON.stringify(rows.map(([t, k, off, dur]) => [stableId(`${key}|${t}|${k}|${off}|${dur}`), t, k, off, dur, 1])));
+  }
+  return true;
 }
-const sumOf = (list, pred) => list.reduce((a, x) => (pred(x) ? a + (x.e - x.s) / 1000 : a), 0);
 
 // ---------- Actions ----------
 async function startTimer(t, k) {
@@ -405,7 +636,7 @@ async function startTimer(t, k) {
   } else {
     if (r) await stopAt(now);
     meta.run = { t, k, s: now };
-    saveMeta();
+    saveRun();
     haptic('heavy');
   }
   render();
@@ -415,7 +646,7 @@ async function stopAt(endMs) {
   const r = meta.run;
   if (!r) return;
   meta.run = null;
-  saveMeta();
+  saveRun();
   if (taskIndex.has(r.t)) await addInterval(r.t, r.k, r.s, Math.max(endMs, r.s));
 }
 
@@ -437,8 +668,8 @@ const hm = (ms) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(
 const localInput = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${hm(ms)}`; };
 const weekdayDate = (d) => d.toLocaleDateString('uk-UA', { weekday: 'long', day: 'numeric', month: 'long' });
 const colorOf = (pid) => COLORS[((projects.get(pid) || {}).c || 0) % COLORS.length];
-const taskName = (tid) => (taskIndex.get(tid) || {}).name || 'Завдання';
-const projectName = (pid) => (projects.get(pid) || {}).n || 'Проєкт';
+const taskLabel = (tid) => { const t = taskIndex.get(tid); return t ? t.name + (t.del ? ' (видалено)' : '') : 'Завдання'; };
+const projectName = (pid) => { const p = projects.get(pid); return p ? p.n + (p.x ? ' (видалено)' : '') : 'Проєкт'; };
 
 let toastTimer = null;
 function toast(text) {
@@ -457,10 +688,7 @@ let historyDay = null;
 let canAddHome = false;
 
 async function go(next, opts = {}) {
-  if (next === 'history') {
-    historyDay = startOfDay(opts.day || new Date());
-    await loadDays([dayKey(historyDay)]);
-  }
+  if (next === 'history') historyDay = startOfDay(opts.day || new Date());
   if (next === 'project') { curPid = opts.pid; editMode = !!opts.edit; }
   if (next === 'home') { editMode = false; }
   view = next;
@@ -483,6 +711,7 @@ function goBack() {
 function render() {
   const now = Date.now();
   const r = meta.run && taskIndex.has(meta.run.t) ? meta.run : null;
+  if (view === 'project' && (!projects.has(curPid) || projects.get(curPid).x)) view = 'home';
   const app = $('app');
   app.innerHTML = view === 'home' ? homeHtml(r) : view === 'project' ? projectHtml(r) : historyHtml(now);
 
@@ -495,15 +724,18 @@ function render() {
     $('bar-sub').textContent = `${projectName(info.pid)} · ${KIND[r.k]}`;
   }
   renderBanner(now);
+  updateSyncPill();
   tick();
 }
 
 function homeHtml(r) {
   const runPid = r ? taskIndex.get(r.t).pid : null;
+  const week = weekNo(new Date());
   return `
     <div class="top"><div>
-      <div class="date">${esc(weekdayDate(new Date()))}${meta.w0 && weekNo(new Date()) >= 1 ? ` · період ${periodOf(new Date())}, тиждень ${(weekNo(new Date()) - 1) % PERIOD_WEEKS + 1} з ${PERIOD_WEEKS}` : ''}</div>
+      <div class="date">${esc(weekdayDate(new Date()))}${week >= 1 ? ` · період ${periodOf(new Date())}, тиждень ${(week - 1) % PERIOD_WEEKS + 1} з ${PERIOD_WEEKS}` : ''}</div>
       <div class="today">Сьогодні: <span class="num" data-live="today-total"></span></div>
+      <div class="sync"></div>
     </div></div>
     <div class="chips">
       <button class="pill" data-act="history">Історія</button>
@@ -512,12 +744,17 @@ function homeHtml(r) {
     </div>
     <div id="banner-slot"></div>
     <div class="section-title">Проєкти</div>
-    ${meta.order.map((pid) => {
+    ${visibleProjects().length ? '' : `<div class="empty-start">
+      <b>Почнімо 👋</b>
+      <span>Додайте перший проєкт, а в ньому — завдання. У кожного завдання буде два таймери: «Робота» і «Правки».</span>
+    </div>`}
+    ${visibleProjects().map((pid) => {
       const p = projects.get(pid);
+      const count = liveTasks(p).length;
       return `<button class="prow${runPid === pid ? ' running' : ''}" data-act="open-project" data-pid="${pid}" style="--c:${colorOf(pid)}">
         <span class="stripe"></span>
         <span class="grow"><div class="nm">${runPid === pid ? '<span class="live-dot"></span>' : ''}${esc(p.n)}</div>
-        <div class="sub">${p.t.length} ${plural(p.t.length)}</div></span>
+        <div class="sub">${count} ${plural(count)}</div></span>
         <span class="val num" data-live="proj:${pid}"></span><span class="chev">›</span>
       </button>`;
     }).join('')}
@@ -535,7 +772,7 @@ function plural(n) {
 function projectHtml(r) {
   const p = projects.get(curPid);
   if (!p) return '';
-  const tasks = p.t.map(([tid, name]) => {
+  const tasks = liveTasks(p).map(([tid, name]) => {
     if (editMode) {
       return `<button class="task edit" data-act="edit-task" data-t="${tid}"><span class="tname">${esc(name)}</span><span class="chev">✎</span></button>`;
     }
@@ -550,6 +787,7 @@ function projectHtml(r) {
     <div class="top"><div>
       <div class="today" style="color:${colorOf(p.id)}">${esc(p.n)}</div>
       <div class="date">Сьогодні: <span class="num" data-live="proj:${p.id}"></span></div>
+      <div class="sync"></div>
     </div><button class="pill${editMode ? ' on' : ''}" data-act="toggle-edit">${editMode ? 'Готово' : 'Змінити'}</button></div>
     <div id="banner-slot"></div>
     ${tasks || '<p class="hint">У проєкті поки немає завдань. Натисніть «Змінити» і додайте.</p>'}
@@ -565,6 +803,8 @@ function historyHtml(now) {
   const yesterday = dayKey(day) === dayKey(addDays(new Date(now), -1));
   const title = isToday ? 'Сьогодні' : yesterday ? 'Вчора' : day.toLocaleDateString('uk-UA', { weekday: 'long' });
   const rows = entriesOf(day, now);
+  const withTime = new Set(rows.map((x) => taskIndex.get(x.t).pid));
+  const shown = meta.order.filter((pid) => projects.has(pid) && (!projects.get(pid).x || withTime.has(pid)));
   return `
     <button class="back" data-act="back">‹ Назад</button>
     <div class="switcher">
@@ -574,7 +814,7 @@ function historyHtml(now) {
     </div>
     <div class="section-title">Разом за день</div>
     <div class="group">
-      ${meta.order.map((pid) => `<div class="row"><span class="estripe" style="background:${colorOf(pid)};height:22px"></span>
+      ${shown.map((pid) => `<div class="row"><span class="estripe" style="background:${colorOf(pid)};height:22px"></span>
         <span class="grow"><div>${esc(projectName(pid))}</div></span><span class="val num" data-live="h-p:${pid}"></span></div>`).join('')}
       <div class="row total"><span class="grow">Всього</span><span class="val num" data-live="h-total"></span></div>
     </div>
@@ -584,7 +824,7 @@ function historyHtml(now) {
         const info = taskIndex.get(x.t);
         return `<button class="row" data-act="entry" data-i="${x.run ? 'run' : x.idx}">
           <span class="estripe" style="background:${x.k ? 'var(--ke)' : 'var(--kw)'}"></span>
-          <span class="grow"><div>${esc(info.name)}</div>
+          <span class="grow"><div>${esc(taskLabel(x.t))}</div>
           <div class="sub">${esc(projectName(info.pid))} · ${KIND[x.k]} · ${hm(x.s)}–${x.run ? 'зараз' : hm(x.e)}</div></span>
           <span class="val num"${x.run ? ' data-live="run-dur"' : ''}>${x.run ? '' : short((x.e - x.s) / 1000)}</span>
         </button>`;
@@ -600,18 +840,12 @@ function renderBanner(now) {
   const r = meta.run;
   if (!r || !taskIndex.has(r.t) || now - r.s <= FORGOTTEN_AFTER) { slot.innerHTML = ''; return; }
   slot.innerHTML = `<div class="banner"><div><b>Таймер іде вже ${short((now - r.s) / 1000)}</b>
-    <span>Забули вимкнути? ${esc(taskName(r.t))}</span></div><button data-act="fix-run">Виправити</button></div>`;
+    <span>Забули вимкнути? ${esc(taskLabel(r.t))}</span></div><button data-act="fix-run">Виправити</button></div>`;
 }
 
 function tick() {
   const now = Date.now();
-  const today = new Date(now);
-  const todayKey = dayKey(today);
-  if (!days.has(todayKey)) {
-    if (!loadingDays.has(todayKey)) { loadingDays.add(todayKey); loadDays([todayKey]).then(() => { loadingDays.delete(todayKey); render(); }); }
-    return;
-  }
-  const te = entriesOf(today, now);
+  const te = entriesOf(new Date(now), now);
   const he = view === 'history' && historyDay ? entriesOf(historyDay, now) : [];
   const pidOf = (x) => taskIndex.get(x.t).pid;
   const r = meta.run && taskIndex.has(meta.run.t) ? meta.run : null;
@@ -680,6 +914,7 @@ function openSheet(title, html, onMount) {
   root.querySelector('.overlay').onclick = closeSheet;
   updateBack();
   onMount(root.querySelector('.sheet'));
+  updateSyncPill();
 }
 
 function confirmThen(message, action) {
@@ -691,10 +926,13 @@ function swatchesHtml(selected) {
   return COLORS.map((c, i) => `<button class="swatch${i === selected ? ' on' : ''}" data-c="${i}" style="background:${c}" aria-label="Колір ${i + 1}"></button>`).join('');
 }
 
-// Project / task pickers shared by the entry and running-timer editors
-function pickerHtml() {
+// Project / task pickers shared by the entry and running-timer editors.
+// Deleted projects/tasks are offered only when the edited entry already belongs to them.
+function pickerHtml(tid) {
+  const own = taskIndex.get(tid);
+  const ids = meta.order.filter((id) => projects.has(id) && (!projects.get(id).x || (own && own.pid === id)));
   return `<div class="group">
-    <label class="field"><span>Проєкт</span><select id="f-project">${meta.order.map((id) => `<option value="${id}">${esc(projectName(id))}</option>`).join('')}</select></label>
+    <label class="field"><span>Проєкт</span><select id="f-project">${ids.map((id) => `<option value="${id}">${esc(projectName(id))}</option>`).join('')}</select></label>
     <label class="field"><span>Завдання</span><select id="f-task"></select></label>
     <label class="field"><span>Тип</span><select id="f-kind">${KIND.map((n, i) => `<option value="${i}">${n}</option>`).join('')}</select></label>
   </div>`;
@@ -703,20 +941,23 @@ function wirePicker(tid, kind, pidFallback) {
   const info = taskIndex.get(tid);
   const fill = () => {
     const p = projects.get(+$('f-project').value);
-    $('f-task').innerHTML = p ? p.t.map(([id, n]) => `<option value="${id}">${esc(n)}</option>`).join('') : '';
+    $('f-task').innerHTML = p
+      ? p.t.filter((x) => !x[2] || x[0] === tid).map(([id, n, del]) => `<option value="${id}">${esc(n + (del ? ' (видалено)' : ''))}</option>`).join('')
+      : '';
   };
-  $('f-project').value = info ? info.pid : (pidFallback && projects.has(pidFallback) ? pidFallback : meta.order[0]);
+  const visible = visibleProjects();
+  $('f-project').value = info ? info.pid : (pidFallback && visible.includes(pidFallback) ? pidFallback : visible[0]);
   fill();
   if (info) $('f-task').value = tid;
   $('f-kind').value = kind || 0;
-  $('f-project').onchange = () => { fill(); $('f-task').dispatchEvent(new Event('input')); };
+  $('f-project').onchange = () => { fill(); $('f-task').dispatchEvent(new Event('input', { bubbles: true })); };
 }
 
 function minutesOf(value) { const [h, m] = value.split(':').map(Number); return h * 60 + m; }
 
 function openEntryEditor(day, index) {
   const dayStart = startOfDay(day).getTime();
-  const list = days.get(dayKey(day)) || [];
+  const list = loadDay(dayKey(day));
   const existing = index != null ? list[index] : null;
   const now = Date.now();
   let s, e;
@@ -726,7 +967,7 @@ function openEntryEditor(day, index) {
   const endValue = e >= dayStart + 86400 * 1000 - 500 ? '00:00' : hm(e);
 
   openSheet(existing ? 'Запис' : 'Новий запис', `
-    ${pickerHtml()}
+    ${pickerHtml(existing ? existing.t : null)}
     <div class="group" style="margin-top:12px">
       <label class="field"><span>Початок</span><input type="time" id="f-start" value="${hm(s)}"></label>
       <label class="field"><span>Кінець</span><input type="time" id="f-end" value="${endValue}"></label>
@@ -757,22 +998,23 @@ function openEntryEditor(day, index) {
       return error ? null : v;
     };
     sheet.addEventListener('input', validate);
+    sheet.addEventListener('change', validate);
     validate();
     $('f-cancel').onclick = closeSheet;
     $('f-save').onclick = () => {
       const v = validate();
       if (!v) return;
-      const entry = { t: +$('f-task').value, k: +$('f-kind').value, s: v.start, e: v.end };
-      const key = dayKey(day);
-      if (!days.has(key)) days.set(key, []);
-      if (existing) Object.assign(existing, entry); else days.get(key).push(entry);
-      saveDay(key);
+      const changes = { t: +$('f-task').value, k: +$('f-kind').value, s: v.start, e: v.end, u: nowSec() };
+      if (existing) Object.assign(existing, changes);
+      else loadDay(dayKey(day)).push(Object.assign({ id: newId(), x: 0 }, changes));
+      saveDay(dayKey(day));
       haptic('success');
       closeSheet();
       render();
     };
     if (existing) $('f-delete').onclick = () => confirmThen('Видалити запис?', () => {
-      days.get(dayKey(day)).splice(index, 1);
+      existing.x = 1;          // kept as a deletion mark so other devices delete it too
+      existing.u = nowSec();
       saveDay(dayKey(day));
       haptic('warning');
       closeSheet();
@@ -789,7 +1031,7 @@ function openRunningEditor() {
   const suggestedEnd = Math.min(now, r.s + 3600 * 1000);
 
   openSheet('Активний таймер', `
-    ${pickerHtml()}
+    ${pickerHtml(r.t)}
     <div class="group" style="margin-top:12px">
       <label class="field"><span>Початок</span><input type="datetime-local" id="r-start" value="${localInput(r.s)}" max="${localInput(now)}"></label>
     </div>
@@ -810,7 +1052,7 @@ function openRunningEditor() {
       if (!isFinite(start) || start > Date.now()) return showNote('Початок не може бути в майбутньому.');
       if (!$('f-task').value) return showNote('Виберіть завдання.');
       meta.run = { t: +$('f-task').value, k: +$('f-kind').value, s: start };
-      saveMeta();
+      saveRun();
       haptic('success');
       closeSheet();
       render();
@@ -828,7 +1070,7 @@ function openRunningEditor() {
     };
     $('r-discard').onclick = () => confirmThen('Видалити активний таймер без запису?', () => {
       meta.run = null;
-      saveMeta();
+      saveRun();
       closeSheet();
       render();
     });
@@ -837,10 +1079,10 @@ function openRunningEditor() {
 
 function addProject() {
   const id = newId();
-  const used = new Set([...projects.values()].map((p) => p.c));
+  const used = new Set([...projects.values()].filter((p) => !p.x).map((p) => p.c));
   let c = 0;
   while (used.has(c) && c < COLORS.length) c++;
-  const p = { id, n: `Проєкт ${meta.order.length + 1}`, c: c % COLORS.length, r: '', t: [] };
+  const p = { id, n: `Проєкт ${visibleProjects().length + 1}`, c: c % COLORS.length, r: '', t: [] };
   projects.set(id, p);
   meta.order.push(id);
   saveProject(p);
@@ -880,13 +1122,10 @@ function openProjectSheet(pid) {
       closeSheet();
       render();
     };
-    $('p-delete').onclick = () => confirmThen(`Видалити проєкт «${p.n}» з усіма завданнями? Записаний час зникне з Excel.`, async () => {
-      if (meta.run && taskIndex.has(meta.run.t) && taskIndex.get(meta.run.t).pid === pid) { meta.run = null; }
-      projects.delete(pid);
-      meta.order = meta.order.filter((id) => id !== pid);
-      Store.remove('p' + pid);
-      saveMeta();
-      rebuildIndex();
+    $('p-delete').onclick = () => confirmThen(`Видалити проєкт «${p.n}»? Він зникне зі списку, а вже записаний час залишиться в історії та Excel.`, async () => {
+      if (meta.run && taskIndex.has(meta.run.t) && taskIndex.get(meta.run.t).pid === pid) await stopAt(Date.now());
+      p.x = 1;
+      saveProject(p);
       haptic('warning');
       closeSheet();
       go('home');
@@ -909,16 +1148,14 @@ function openTaskSheet(tid) {
       if (!name) return;
       if (existing) existing[1] = name; else p.t.push([newId(), name]);
       saveProject(p);
-      saveMeta();
       haptic('success');
       closeSheet();
       render();
     };
-    if (existing) $('t-delete').onclick = () => confirmThen(`Видалити завдання «${existing[1]}»? Записаний по ньому час зникне з Excel.`, async () => {
-      if (meta.run && meta.run.t === tid) meta.run = null;
-      p.t = p.t.filter((x) => x[0] !== tid);
+    if (existing) $('t-delete').onclick = () => confirmThen(`Видалити завдання «${existing[1]}»? Воно зникне зі списку, а вже записаний час залишиться в історії та Excel.`, async () => {
+      if (meta.run && meta.run.t === tid) await stopAt(Date.now());
+      existing[2] = 1;
       saveProject(p);
-      saveMeta();
       haptic('warning');
       closeSheet();
       render();
@@ -933,34 +1170,35 @@ function openSettings() {
       <label class="field"><span>Роль за замовчуванням</span><input type="text" id="s-role" maxlength="30" value="${esc(meta.role)}"></label>
     </div>
     <p class="note">Ім'я потрапить у першу колонку Excel-таблиці. Роль можна задати окремо для кожного проєкту (Змінити → Назва, роль і колір); ця використовується, якщо в проєкті роль не вказана.</p>
-    <div class="group" style="margin-top:12px">
-      <label class="field"><span>Тиждень 1 починається</span><input type="date" id="s-w0" value="${esc(meta.w0 || '')}"></label>
-    </div>
-    <p class="note">З цього тижня починається період 1. Періоди йдуть поспіль по 4 тижні (пн–нд), без прив'язки до місяців. Вибрана дата округлюється до понеділка свого тижня.</p>
-    <div class="actions"><button class="btn-cancel" id="s-cancel">Скасувати</button><button class="btn-save" id="s-save">Зберегти</button></div>`,
+    <div class="actions"><button class="btn-cancel" id="s-cancel">Скасувати</button><button class="btn-save" id="s-save">Зберегти</button></div>
+    <div class="section-title">Дані</div>
+    <div class="group"><div class="row"><span class="grow">Синхронізація</span><span class="val sync"></span></div></div>
+    <p class="note">Усе записується спочатку на телефон, а коли є інтернет — на сервер. Без зв'язку трекер працює, зміни відправляться самі. Періоди звітів: по 4 тижні від 5 жовтня 2026. Резервна копія — команда /backup у чаті з ботом.</p>
+    <button class="primary" id="s-support">🆘 Технічна підтримка</button>`,
   () => {
     $('s-cancel').onclick = closeSheet;
     $('s-save').onclick = () => {
       meta.name = $('s-name').value.trim();
       meta.role = $('s-role').value.trim();
-      if ($('s-w0').value) meta.w0 = isoDate(mondayOf(parseIso($('s-w0').value)));
       saveMeta();
       haptic('success');
       closeSheet();
       render();
     };
+    $('s-support').onclick = () => {
+      const link = `https://t.me/${BOT_USERNAME}?start=support`;
+      if (inTelegram && W.openTelegramLink) W.openTelegramLink(link); else window.open(link, '_blank');
+    };
   });
 }
 
 // ---------- Excel export ----------
-// Reports cover periods of 4 consecutive Mon-Sun weeks counted from meta.w0, not calendar months:
-// period 1 = weeks 1-4, period 2 = weeks 5-8, ...
-const PERIOD_WEEKS = 4;
+// Reports cover periods of 4 consecutive Mon-Sun weeks counted from TEAM_W0, not calendar months.
 let expPeriod = 1;
 let expToken = 0;
 
 const periodOf = (date) => Math.max(1, Math.floor((weekNo(date) - 1) / PERIOD_WEEKS) + 1);
-const periodStart = (n) => addDays(parseIso(meta.w0 || isoDate(mondayOf(new Date()))), (n - 1) * PERIOD_WEEKS * 7);
+const periodStart = (n) => addDays(parseIso(TEAM_W0), (n - 1) * PERIOD_WEEKS * 7);
 const dm = (d) => `${d.getDate()}.${pad(d.getMonth() + 1)}`;
 const dmRu = (d) => d.toLocaleDateString('uk-UA', { day: 'numeric', month: 'short' });
 
@@ -971,11 +1209,13 @@ function toB64Url(obj) {
   return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-/** Minutes per task / kind / week for one 4-week period. */
+/**
+ * Minutes per task / kind / week for one 4-week period. Deleted tasks and projects appear
+ * only when they have time in the period. Must match periodPayload() on the server.
+ */
 async function buildPayload(n) {
   const start = periodStart(n);
   const dayList = Array.from({ length: PERIOD_WEEKS * 7 }, (_, i) => addDays(start, i));
-  await loadDays(dayList.map(dayKey));
   const now = Date.now();
   const nw = PERIOD_WEEKS;
   const wr = Array.from({ length: nw }, (_, w) => `${dm(dayList[w * 7])}–${dm(dayList[w * 7 + 6])}`);
@@ -990,13 +1230,24 @@ async function buildPayload(n) {
     }
   });
   const toMin = (a) => a.map((s) => Math.round(s / 60));
+  const out = [];
+  for (const pid of meta.order) {
+    const p = projects.get(pid);
+    if (!p) continue;
+    const hasTime = p.t.some(([tid]) => acc.has(tid));
+    if (p.x && !hasTime) continue;
+    out.push({
+      n: p.x ? `${p.n} (видалено)` : p.n,
+      r: p.r || meta.role || '',
+      t: p.t.filter(([tid, , del]) => !del || acc.has(tid)).map(([tid, name, del]) => {
+        const a = acc.get(tid) || { w: zeros(), e: zeros() };
+        return { n: del ? `${name} (видалено)` : name, w: toMin(a.w), e: toMin(a.e) };
+      }),
+    });
+  }
   return {
     pn: n, from: isoDate(start), to: isoDate(dayList[dayList.length - 1]), at: now,
-    name: meta.name || tgName(), role: meta.role || '', nw, wr,
-    p: meta.order.map((pid) => {
-      const p = projects.get(pid);
-      return { n: p.n, r: p.r || meta.role || '', t: p.t.map(([tid, name]) => { const a = acc.get(tid) || { w: zeros(), e: zeros() }; return { n: name, w: toMin(a.w), e: toMin(a.e) }; }) };
-    }),
+    name: meta.name || tgName(), role: meta.role || '', nw, wr, p: out,
   };
 }
 
@@ -1032,7 +1283,7 @@ async function renderExport() {
       ${payload.p.map((p) => `<div class="row"><span class="grow"><div>${esc(p.n)}</div></span><span class="val num">${short(total(p) * 60)}</span></div>`).join('')}
       <div class="row total"><span class="grow">Всього за 4 тижні</span><span class="val num">${short(all * 60)}</span></div>
     </div>
-    <p class="note">Таблиця відкриється в браузері телефона — там натисніть «Завантажити». У ній 4 колонки «Тиж. 1–4» — тижні цього періоду (пн–нд), окремо «Робота» і «Правки». Час у форматі ГОД.ХВ, як у вашому зразку.</p>
+    <p class="note">Таблиця відкриється в браузері телефона — там натисніть «Завантажити». У ній 4 колонки «Тиж. 1–4» — тижні цього періоду (пн–нд), окремо «Робота» і «Правки». Час у форматі ГОД.ХВ, як у вашому зразку. Після кожного періоду бот сам надішле звіт у чат.</p>
     <button class="primary" id="x-open">Відкрити таблицю</button>`;
   wire();
   $('x-open').onclick = () => {
@@ -1042,6 +1293,13 @@ async function renderExport() {
 }
 
 // ---------- Start ----------
+function askWriteAccess() {
+  // lets the bot send the period report to this person even if they never pressed Start
+  if (!supports('6.9') || !tgUser || tgUser.allows_write_to_pm || Local.get('_askedWrite')) return;
+  Local.set('_askedWrite', '1');
+  W.requestWriteAccess(() => {});
+}
+
 async function init() {
   if (inTelegram) {
     W.ready();
@@ -1056,32 +1314,28 @@ async function init() {
     }
   }
 
-  // Instant render from the local cache, then refresh from the Telegram cloud.
-  const cachedMeta = parseJSON(Store.localGet('meta'), null);
-  if (cachedMeta && Array.isArray(cachedMeta.order)) {
-    meta = Object.assign(meta, cachedMeta);
-    for (const id of meta.order) {
-      const p = parseJSON(Store.localGet('p' + id), null);
-      if (p) projects.set(id, { id, n: p.n, c: p.c || 0, t: p.t, r: p.r || '' });
+  if (!loadFromPhone()) {
+    if (!(await migrateFromV2())) {
+      // a new phone: data may already exist on the server (another device), so ask it first
+      if (inTelegram) {
+        $('app').innerHTML = '<p class="hint">Завантажую дані…</p>';
+        await withTimeout(syncNow(), 8000, null);
+      }
+      if (!loadFromPhone()) seedDefaults();
     }
-    meta.order = meta.order.filter((id) => projects.has(id));
-    rebuildIndex();
-    render();
   }
-
-  const found = await loadAll();
-  if (!found) {
-    if (!projects.size) seedDefaults();
-    else { saveMeta(); }
-  }
-  if (!meta.name) { meta.name = tgName(); }
+  if (!meta.name && tgName()) { meta.name = tgName(); saveMeta(); }
   migrateDefaults();
-  await ensureWeekStart();
-  await loadDays([dayKey(new Date())]);
   render();
 
   setInterval(tick, 1000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
+  setInterval(syncNow, 60000);
+  window.addEventListener('online', () => syncNow());
+  window.addEventListener('offline', () => { SyncState.status = 'offline'; updateSyncPill(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { render(); syncNow(); } });
+  syncNow();
+  askWriteAccess();
+  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
   checkForUpdate();
 }
 
